@@ -71,8 +71,8 @@ Copy the `refresh_token` from the response.
 2. Copy the playlist link → the ID is the last part of the URL
    ```
    https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
-                                       └─────────────────────┘
-                                              Playlist ID
+                                    └──────────────────────┘
+                                           Playlist ID
    ```
 
 ### Step 5: Add GitHub Secrets

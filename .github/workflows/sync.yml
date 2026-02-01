@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      track_count:
+        description: "Number of tracks to sync (1-50)"
+        required: false
+        default: "50"
+        type: string
 
 concurrency:
   group: spotify-sync
@@ -18,7 +24,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Deno
@@ -26,11 +32,11 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Run sync script
+      - name: Sync playlist
         run: deno run --allow-net --allow-env src/sync.ts
         env:
           SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
           SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
           SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
           PLAYLIST_ID: ${{ secrets.PLAYLIST_ID }}
-          TRACK_COUNT: "50"
+          TRACK_COUNT: ${{ inputs.track_count || '50' }}

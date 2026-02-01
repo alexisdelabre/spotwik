@@ -1,193 +1,156 @@
-# Spotwik
+<div align="center">
 
-Spotify playlist automation toolkit.
+# 🎵 Spotwik
 
-## What it does
+**Keep your favorite Spotify playlist synced with your latest liked songs**
 
-This tool keeps a Spotify playlist updated with your most recent liked songs. Every 30 minutes, GitHub Actions runs a sync that:
+[![Deno](https://img.shields.io/badge/Deno-2.x-black?logo=deno)](https://deno.land)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub Actions](https://img.shields.io/badge/Runs%20on-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-1. Fetches your latest liked songs from Spotify
-2. Updates a target playlist with the most recent 50 tracks
-3. Removes older tracks that have fallen out of the top 50
+---
 
-No server required - runs entirely on GitHub Actions.
+*Automatically syncs your last 50 liked songs to a playlist — every 30 minutes, no server required.*
 
-## Prerequisites
+</div>
 
-- [Spotify Developer account](https://developer.spotify.com/dashboard) (free)
-- GitHub account
-- Deno 2.x+ (for local development only)
+## ✨ Features
 
-## Quick Start
+- **🔄 Auto-sync** — Runs every 30 minutes via GitHub Actions
+- **🎯 Always fresh** — Your playlist reflects your most recent likes
+- **☁️ Serverless** — No hosting costs, runs free on GitHub
+- **🔒 Secure** — Credentials stored as GitHub Secrets
+- **⚡ Fast** — Powered by Deno, syncs in seconds
 
-### 1. Create a Spotify Developer App
+---
 
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Click "Create app"
-3. Fill in:
-   - App name: anything you like (e.g., "My Liked Songs Sync")
-   - App description: anything
-   - Redirect URI: `http://localhost:3000/callback`
-4. Check "Web API" under "Which API/SDKs are you planning to use?"
-5. Accept the terms and click "Save"
-6. Note your **Client ID** and **Client Secret** (click "View client secret")
+## 🚀 Quick Setup
 
-### 2. Get Your Refresh Token
+### Step 1: Fork this repository
 
-This is a one-time process to authorize the app to access your Spotify account.
+Click the **Fork** button at the top right of this page.
 
-1. Replace the placeholders and open this URL in your browser:
-   ```
-   https://accounts.spotify.com/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost:3000/callback&scope=user-library-read%20playlist-modify-public%20playlist-modify-private
-   ```
+### Step 2: Create a Spotify App
 
-2. Authorize the app when prompted
+1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+2. Click **Create app**
+3. Fill in any name and description
+4. Set Redirect URI to: `http://localhost:3000/callback`
+5. Check **Web API** and save
+6. Copy your **Client ID** and **Client Secret**
 
-3. You'll be redirected to a URL like:
-   ```
-   http://localhost:3000/callback?code=AQBx...
-   ```
-   Copy the `code` value (everything after `code=`)
+### Step 3: Get your Refresh Token
 
-4. Exchange the code for tokens using curl (wrap values in quotes to handle special characters):
-   ```bash
-   curl -X POST https://accounts.spotify.com/api/token \
-     -H "Content-Type: application/x-www-form-urlencoded" \
-     -d "grant_type=authorization_code" \
-     -d "code=YOUR_AUTHORIZATION_CODE" \
-     -d "redirect_uri=http://localhost:3000/callback" \
-     -d "client_id=YOUR_CLIENT_ID" \
-     -d "client_secret=YOUR_CLIENT_SECRET"
-   ```
-   > **Note:** If your authorization code contains `+` or other special characters, they're already URL-encoded. Use the code exactly as it appears in the URL.
+Open this URL in your browser (replace `YOUR_CLIENT_ID`):
 
-5. From the JSON response, copy the `refresh_token` value
+```
+https://accounts.spotify.com/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost:3000/callback&scope=user-library-read%20playlist-modify-public%20playlist-modify-private
+```
 
-### 3. Create Target Playlist
+After authorizing, you'll be redirected to a URL like:
+```
+http://localhost:3000/callback?code=AQBx...YOUR_CODE_HERE
+```
 
-1. Open Spotify (desktop app or web player)
-2. Create a new playlist (name it anything, e.g., "Recent Likes")
-3. Right-click the playlist > "Share" > "Copy link to playlist"
-4. The link looks like: `https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M`
-5. The playlist ID is the last part: `37i9dQZF1DXcBWIGoYBM5M`
-
-### 4. Configure GitHub Secrets
-
-1. Go to your forked repository on GitHub
-2. Navigate to Settings > Secrets and variables > Actions
-3. Add these secrets (click "New repository secret" for each):
-
-| Secret Name | Value |
-|-------------|-------|
-| `SPOTIFY_CLIENT_ID` | Your app's Client ID |
-| `SPOTIFY_CLIENT_SECRET` | Your app's Client Secret |
-| `SPOTIFY_REFRESH_TOKEN` | The refresh token from step 2 |
-| `PLAYLIST_ID` | Your target playlist ID from step 3 |
-
-### 5. Enable GitHub Actions
-
-1. Go to the "Actions" tab in your repository
-2. If prompted, click "I understand my workflows, go ahead and enable them"
-3. The sync will run automatically every 30 minutes
-4. To run immediately: click "Spotify Sync" > "Run workflow" > "Run workflow"
-
-## Local Development
-
-### Setup
+Copy the code and run this command:
 
 ```bash
-# Clone the repository
-git clone https://github.com/alexisdelabre/spotwik.git
+curl -X POST https://accounts.spotify.com/api/token \
+  -d grant_type=authorization_code \
+  -d code=YOUR_CODE \
+  -d redirect_uri=http://localhost:3000/callback \
+  -d client_id=YOUR_CLIENT_ID \
+  -d client_secret=YOUR_CLIENT_SECRET
+```
+
+Copy the `refresh_token` from the response.
+
+### Step 4: Create your target playlist
+
+1. Open Spotify and create a new playlist
+2. Copy the playlist link → the ID is the last part of the URL
+   ```
+   https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
+                                       └─────────────────────┘
+                                              Playlist ID
+   ```
+
+### Step 5: Add GitHub Secrets
+
+Go to your fork: **Settings** → **Secrets and variables** → **Actions**
+
+Add these 4 secrets:
+
+| Secret | Value |
+|--------|-------|
+| `SPOTIFY_CLIENT_ID` | Your Client ID |
+| `SPOTIFY_CLIENT_SECRET` | Your Client Secret |
+| `SPOTIFY_REFRESH_TOKEN` | Your refresh token |
+| `PLAYLIST_ID` | Your playlist ID |
+
+### Step 6: Enable Actions
+
+Go to the **Actions** tab and enable workflows.
+
+**🎉 Done!** Your playlist will sync automatically every 30 minutes.
+
+> **Tip:** Click **Run workflow** to trigger an immediate sync.
+
+---
+
+## ⚙️ Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `TRACK_COUNT` | `50` | Number of liked songs to sync (max: 50) |
+
+You can customize `TRACK_COUNT` when manually triggering the workflow.
+
+---
+
+## 🛠️ Local Development
+
+```bash
+# Clone your fork
+git clone https://github.com/YOUR_USERNAME/spotwik.git
 cd spotwik
 
-# Copy environment template
+# Create .env.local with your credentials
 cp .env.example .env.local
 
-# Edit .env.local with your credentials
-```
-
-### Testing
-
-```bash
-# Run all unit tests
+# Run tests
 deno task test
 
-# Type check
-deno task check
-```
-
-### Running Sync Manually
-
-```bash
-# Run the sync script (with .env.local)
+# Run sync locally
 deno task sync:dev
-
-# Or run directly with env vars
-deno task sync
 ```
 
-## Environment Variables
+---
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SPOTIFY_CLIENT_ID` | Yes | Spotify app Client ID from Developer Dashboard |
-| `SPOTIFY_CLIENT_SECRET` | Yes | Spotify app Client Secret |
-| `SPOTIFY_REFRESH_TOKEN` | Yes | OAuth refresh token (generated once) |
-| `PLAYLIST_ID` | Yes | Target playlist ID to update |
-| `TRACK_COUNT` | No | Number of liked songs to sync (default: 50) |
+## ❓ Troubleshooting
 
-## Troubleshooting
+<details>
+<summary><strong>Invalid refresh token</strong></summary>
 
-### "Invalid refresh token" or "invalid_grant" error
+Your token may have been revoked. Generate a new one by repeating Step 3.
+</details>
 
-Spotify refresh tokens don't expire, but they can become invalid if:
-- You revoked app access in your [Spotify account settings](https://www.spotify.com/account/apps/)
-- Your Spotify app's Client Secret was regenerated
-- The token was generated with a different Client ID
+<details>
+<summary><strong>Playlist not found</strong></summary>
 
-To fix: Repeat step 2 to generate a new refresh token.
+- Check that the playlist ID is correct
+- Make sure the playlist is owned by your account
+</details>
 
-### "Playlist not found" error
+<details>
+<summary><strong>Sync not running</strong></summary>
 
-- Make sure the playlist ID is correct
-- Ensure the playlist exists and is not deleted
-- The playlist must be owned by your Spotify account
+- Go to **Actions** tab and check for errors
+- Make sure workflows are enabled
+</details>
 
-### Sync not running automatically
+---
 
-- Check that GitHub Actions is enabled for your repository
-- Go to Actions tab and verify the workflow is not disabled
-- Check the workflow runs for any errors
+## 📄 License
 
-### "Rate limit exceeded" error
-
-Spotify has API rate limits. The 30-minute schedule is designed to stay within limits. If you see this error, wait a few hours before retrying.
-
-## How It Works
-
-The sync process:
-
-1. Uses your refresh token to get a new access token from Spotify
-2. Fetches the specified number of tracks from your Liked Songs
-3. Replaces the contents of the target playlist with these tracks
-4. Logs the results and exits
-
-The GitHub Actions workflow runs this script every 30 minutes using a cron schedule. You can also trigger it manually from the Actions tab.
-
-## Project Structure
-
-```
-spotwik/
-├── .github/workflows/
-│   └── sync.yml              # GitHub Actions workflow (runs every 30 min)
-├── src/
-│   ├── sync.ts               # Main sync script
-│   ├── sync.test.ts          # Unit tests
-│   └── dev.ts                # Dev entry point (loads .env)
-├── .env.example              # Environment template
-└── deno.json                 # Deno configuration
-```
-
-## License
-
-MIT
+MIT © [Alexis Delabre](https://github.com/alexisdelabre)

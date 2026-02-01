@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/logo-white.svg" alt="Spotwik logo" width="128" height="128">
-
 # Spotwik
 
 **Keep your favorite Spotify playlist synced with your latest liked songs**
@@ -13,6 +11,8 @@
 ---
 
 *Automatically syncs your last 50 liked songs to a playlist — every 30 minutes, no server required.*
+
+<img src="assets/preview.png" alt="Spotwik playlist preview" width="600">
 
 </div>
 

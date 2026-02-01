@@ -7,8 +7,8 @@ Spotify playlist automation toolkit.
 This tool keeps a Spotify playlist updated with your most recent liked songs. Every 30 minutes, GitHub Actions runs a sync that:
 
 1. Fetches your latest liked songs from Spotify
-2. Updates a target playlist with the most recent 30 tracks
-3. Removes older tracks that have fallen out of the top 30
+2. Updates a target playlist with the most recent 50 tracks
+3. Removes older tracks that have fallen out of the top 50
 
 No server required - runs entirely on GitHub Actions.
 
@@ -16,7 +16,7 @@ No server required - runs entirely on GitHub Actions.
 
 - [Spotify Developer account](https://developer.spotify.com/dashboard) (free)
 - GitHub account
-- Node.js 20+ (for local development only)
+- Deno 2.x+ (for local development only)
 
 ## Quick Start
 
@@ -100,9 +100,6 @@ This is a one-time process to authorize the app to access your Spotify account.
 git clone https://github.com/alexisdelabre/spotwik.git
 cd spotwik
 
-# Install dependencies
-npm install
-
 # Copy environment template
 cp .env.example .env.local
 
@@ -112,24 +109,21 @@ cp .env.example .env.local
 ### Testing
 
 ```bash
-# Run all unit tests (80 tests - covers auth, API calls, error handling)
-npm test
+# Run all unit tests
+deno task test
 
-# Run integration test with real Spotify API (requires .env.local)
-npm run test:integration
+# Type check
+deno task check
 ```
-
-The integration test verifies:
-- Token retrieval works with real credentials
-- Playlist details can be fetched
-- Playlist title matches the `LAST{N}LIKED` format
-- Sync timestamp description is present
 
 ### Running Sync Manually
 
 ```bash
-# Run the sync script
-npm run sync
+# Run the sync script (with .env.local)
+deno task sync:dev
+
+# Or run directly with env vars
+deno task sync
 ```
 
 ## Environment Variables
@@ -140,7 +134,7 @@ npm run sync
 | `SPOTIFY_CLIENT_SECRET` | Yes | Spotify app Client Secret |
 | `SPOTIFY_REFRESH_TOKEN` | Yes | OAuth refresh token (generated once) |
 | `PLAYLIST_ID` | Yes | Target playlist ID to update |
-| `TRACK_COUNT` | No | Number of liked songs to sync (default: 30) |
+| `TRACK_COUNT` | No | Number of liked songs to sync (default: 50) |
 
 ## Troubleshooting
 
@@ -188,14 +182,10 @@ spotwik/
 │   └── sync.yml              # GitHub Actions workflow (runs every 30 min)
 ├── src/
 │   ├── sync.ts               # Main sync script
-│   ├── sync-logger.ts        # Logging module
 │   ├── sync.test.ts          # Unit tests
-│   ├── verify-playlist.ts    # Integration test script
-│   ├── verify-playlist-logger.ts
-│   └── verify-playlist.test.ts # Integration test unit tests
+│   └── dev.ts                # Dev entry point (loads .env)
 ├── .env.example              # Environment template
-├── package.json              # Dependencies and scripts
-└── tsconfig.json             # TypeScript configuration (CommonJS)
+└── deno.json                 # Deno configuration
 ```
 
 ## License

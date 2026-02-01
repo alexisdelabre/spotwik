@@ -1,5 +1,4 @@
 // src/sync.ts - Spotify Likes Sync
-import { log } from './sync-logger';
 
 /** Request timeout in milliseconds */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -11,15 +10,18 @@ const REQUEST_TIMEOUT_MS = 10_000;
  * @returns Access token string on success, null on failure
  */
 export async function getAccessToken(): Promise<string | null> {
-  const clientId = process.env.SPOTIFY_CLIENT_ID;
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-  const refreshToken = process.env.SPOTIFY_REFRESH_TOKEN;
+  const clientId = Deno.env.get("SPOTIFY_CLIENT_ID");
+  const clientSecret = Deno.env.get("SPOTIFY_CLIENT_SECRET");
+  const refreshToken = Deno.env.get("SPOTIFY_REFRESH_TOKEN");
 
-  if (!clientId || !clientSecret || !refreshToken) { log.tokenMissingCredentials(); return null; }
+  if (!clientId || !clientSecret || !refreshToken) {
+    console.error('❌ Missing Spotify credentials in environment');
+    return null;
+  }
 
-  log.tokenRefreshing();
+  console.log('🔄 Refreshing access token...');
 
-  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const basicAuth = btoa(`${clientId}:${clientSecret}`);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -36,8 +38,11 @@ export async function getAccessToken(): Promise<string | null> {
     });
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') log.tokenTimeout();
-    else log.tokenNetworkError();
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('❌ Token refresh failed: request timeout');
+    } else {
+      console.error('❌ Token refresh failed: network error');
+    }
     return null;
   }
   clearTimeout(timeoutId);
@@ -46,14 +51,20 @@ export async function getAccessToken(): Promise<string | null> {
     try {
       const errorData: unknown = await response.json();
       const errorType = (errorData as { error?: string })?.error ?? 'unknown';
-      log.tokenApiError(errorType, response.status);
-    } catch { log.tokenStatusError(response.status); }
+      console.error(`❌ Token refresh failed: ${errorType} (${response.status})`);
+    } catch {
+      console.error(`❌ Token refresh failed: ${response.status}`);
+    }
     return null;
   }
 
   let data: unknown;
-  try { data = await response.json(); }
-  catch { log.tokenInvalidFormat(); return null; }
+  try {
+    data = await response.json();
+  } catch {
+    console.error('❌ Token refresh failed: invalid response format');
+    return null;
+  }
 
   const accessToken =
     data &&
@@ -63,7 +74,10 @@ export async function getAccessToken(): Promise<string | null> {
       ? (data as { access_token: string }).access_token
       : null;
 
-  if (!accessToken || accessToken.trim() === '') { log.tokenMissingInResponse(); return null; }
+  if (!accessToken || accessToken.trim() === '') {
+    console.error('❌ Token refresh failed: missing or empty access_token in response');
+    return null;
+  }
 
   return accessToken;
 }
@@ -76,13 +90,16 @@ export async function getAccessToken(): Promise<string | null> {
  * @returns Array of track URIs (e.g., "spotify:track:xxx"), null on API failure
  */
 export async function getRecentLikes(accessToken: string): Promise<string[] | null> {
-  const trackCountEnv = process.env.TRACK_COUNT;
-  let trackCount = trackCountEnv ? parseInt(trackCountEnv, 10) : 30;
+  const trackCountEnv = Deno.env.get("TRACK_COUNT");
+  let trackCount = trackCountEnv ? parseInt(trackCountEnv, 10) : 50;
 
-  if (isNaN(trackCount) || trackCount < 1) trackCount = 30;
-  if (trackCount > 50) { log.trackCountExceedsLimit(trackCountEnv!); trackCount = 50; }
+  if (isNaN(trackCount) || trackCount < 1) trackCount = 50;
+  if (trackCount > 50) {
+    console.log(`ℹ️ TRACK_COUNT ${trackCountEnv} exceeds API limit, using 50`);
+    trackCount = 50;
+  }
 
-  log.fetchingLikes(trackCount);
+  console.log(`🔄 Fetching ${trackCount} most recent likes...`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -96,8 +113,11 @@ export async function getRecentLikes(accessToken: string): Promise<string[] | nu
     });
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') log.fetchLikesTimeout();
-    else log.fetchLikesNetworkError();
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('❌ Fetch likes failed: request timeout');
+    } else {
+      console.error('❌ Fetch likes failed: network error');
+    }
     return null;
   }
   clearTimeout(timeoutId);
@@ -106,17 +126,26 @@ export async function getRecentLikes(accessToken: string): Promise<string[] | nu
     try {
       const errorData: unknown = await response.json();
       const errorMsg = (errorData as { error?: { message?: string } })?.error?.message ?? 'unknown';
-      log.fetchLikesApiError(errorMsg, response.status);
-    } catch { log.fetchLikesStatusError(response.status); }
+      console.error(`❌ Fetch likes failed: ${errorMsg} (${response.status})`);
+    } catch {
+      console.error(`❌ Fetch likes failed: ${response.status}`);
+    }
     return null;
   }
 
   let data: unknown;
-  try { data = await response.json(); }
-  catch { log.fetchLikesInvalidFormat(); return null; }
+  try {
+    data = await response.json();
+  } catch {
+    console.error('❌ Fetch likes failed: invalid response format');
+    return null;
+  }
 
   const items = (data as { items?: unknown[] })?.items;
-  if (!Array.isArray(items)) { log.fetchLikesUnexpectedStructure(); return null; }
+  if (!Array.isArray(items)) {
+    console.error('❌ Fetch likes failed: unexpected response structure');
+    return null;
+  }
 
   const trackUris: string[] = [];
   for (const item of items) {
@@ -135,11 +164,14 @@ export async function getRecentLikes(accessToken: string): Promise<string[] | nu
  * @returns Array of track URIs, null on any error (fail-safe)
  */
 export async function getPlaylistTracks(accessToken: string): Promise<string[] | null> {
-  const playlistId = process.env.PLAYLIST_ID;
+  const playlistId = Deno.env.get("PLAYLIST_ID");
 
-  if (!playlistId || playlistId.trim() === '') { log.playlistNotConfigured(); return null; }
+  if (!playlistId || playlistId.trim() === '') {
+    console.error('❌ PLAYLIST_ID not configured');
+    return null;
+  }
 
-  log.fetchingPlaylistTracks();
+  console.log('🔄 Fetching current playlist tracks...');
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -153,20 +185,33 @@ export async function getPlaylistTracks(accessToken: string): Promise<string[] |
     });
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') log.fetchPlaylistTracksTimeout();
-    else log.fetchPlaylistTracksNetworkError();
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.warn('⚠️ Fetch playlist tracks timed out - proceeding with update');
+    } else {
+      console.warn('⚠️ Fetch playlist tracks network error - proceeding with update');
+    }
     return null;
   }
   clearTimeout(timeoutId);
 
-  if (!response.ok) { log.fetchPlaylistTracksError(); return null; }
+  if (!response.ok) {
+    console.warn('⚠️ Fetch playlist tracks failed - proceeding with update');
+    return null;
+  }
 
   let data: unknown;
-  try { data = await response.json(); }
-  catch { log.fetchPlaylistTracksInvalidFormat(); return null; }
+  try {
+    data = await response.json();
+  } catch {
+    console.warn('⚠️ Fetch playlist tracks invalid format - proceeding with update');
+    return null;
+  }
 
   const items = (data as { items?: unknown[] })?.items;
-  if (!Array.isArray(items)) { log.fetchPlaylistTracksUnexpectedStructure(); return null; }
+  if (!Array.isArray(items)) {
+    console.warn('⚠️ Fetch playlist tracks unexpected structure - proceeding with update');
+    return null;
+  }
 
   const trackUris: string[] = [];
   for (const item of items) {
@@ -174,7 +219,7 @@ export async function getPlaylistTracks(accessToken: string): Promise<string[] |
     if (typeof uri === 'string' && uri.startsWith('spotify:track:')) trackUris.push(uri);
   }
 
-  log.fetchPlaylistTracks(trackUris.length);
+  console.log(`✅ Fetched ${trackUris.length} current playlist tracks`);
   return trackUris;
 }
 
@@ -187,11 +232,14 @@ export async function getPlaylistTracks(accessToken: string): Promise<string[] |
  * @returns true on success, false on failure
  */
 export async function updatePlaylist(accessToken: string, trackUris: string[]): Promise<boolean> {
-  const playlistId = process.env.PLAYLIST_ID;
+  const playlistId = Deno.env.get("PLAYLIST_ID");
 
-  if (!playlistId || playlistId.trim() === '') { log.playlistNotConfigured(); return false; }
+  if (!playlistId || playlistId.trim() === '') {
+    console.error('❌ PLAYLIST_ID not configured');
+    return false;
+  }
 
-  log.updatingPlaylist(trackUris.length);
+  console.log(`🔄 Updating playlist with ${trackUris.length} tracks...`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -210,8 +258,11 @@ export async function updatePlaylist(accessToken: string, trackUris: string[]): 
     });
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') log.updatePlaylistTimeout();
-    else log.updatePlaylistNetworkError();
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.error('❌ Update playlist failed: request timeout');
+    } else {
+      console.error('❌ Update playlist failed: network error');
+    }
     return false;
   }
   clearTimeout(timeoutId);
@@ -220,11 +271,18 @@ export async function updatePlaylist(accessToken: string, trackUris: string[]): 
     try {
       const errorData: unknown = await response.json();
       const errorMsg = (errorData as { error?: { message?: string } })?.error?.message ?? 'unknown';
-      if (response.status === 404) log.updatePlaylistNotFound();
-      else if (response.status === 403) log.updatePlaylistForbidden();
-      else if (response.status === 401) log.updatePlaylistUnauthorized();
-      else log.updatePlaylistApiError(errorMsg, response.status);
-    } catch { log.updatePlaylistStatusError(response.status); }
+      if (response.status === 404) {
+        console.error('❌ Update playlist failed: Playlist not found');
+      } else if (response.status === 403) {
+        console.error('❌ Update playlist failed: Permission denied');
+      } else if (response.status === 401) {
+        console.error('❌ Update playlist failed: Authentication failed');
+      } else {
+        console.error(`❌ Update playlist failed: ${errorMsg} (${response.status})`);
+      }
+    } catch {
+      console.error(`❌ Update playlist failed: ${response.status}`);
+    }
     return false;
   }
 
@@ -243,11 +301,16 @@ export async function updatePlaylistMetadata(
   accessToken: string,
   metadata: { name?: string; description?: string }
 ): Promise<boolean> {
-  const playlistId = process.env.PLAYLIST_ID;
+  const playlistId = Deno.env.get("PLAYLIST_ID");
 
-  if (!playlistId || playlistId.trim() === '') { log.playlistNotConfigured(); return false; }
+  if (!playlistId || playlistId.trim() === '') {
+    console.error('❌ PLAYLIST_ID not configured');
+    return false;
+  }
 
-  if (metadata.name) log.updatingPlaylistTitle(metadata.name);
+  if (metadata.name) {
+    console.log(`🔄 Updating playlist title to ${metadata.name}...`);
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -266,15 +329,23 @@ export async function updatePlaylistMetadata(
     });
   } catch (error) {
     clearTimeout(timeoutId);
-    if (error instanceof Error && error.name === 'AbortError') log.playlistTitleTimeout();
-    else log.playlistTitleNetworkError();
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.warn('⚠️ Playlist title update timed out');
+    } else {
+      console.warn('⚠️ Playlist title update network error');
+    }
     return false;
   }
   clearTimeout(timeoutId);
 
-  if (!response.ok) { log.playlistTitleUpdateFailed(); return false; }
+  if (!response.ok) {
+    console.warn('⚠️ Could not update playlist title');
+    return false;
+  }
 
-  if (metadata.name) log.playlistTitleUpdated();
+  if (metadata.name) {
+    console.log('✅ Playlist title updated');
+  }
   return true;
 }
 
@@ -282,22 +353,39 @@ export async function updatePlaylistMetadata(
  * Main entry point for the Spotify sync script.
  */
 export async function main(): Promise<void> {
-  log.syncInitialized();
+  console.log('🔄 Spotify sync script initialized');
 
   const accessToken = await getAccessToken();
-  if (!accessToken) { log.syncFailedNoToken(); process.exit(1); }
-  log.tokenSuccess();
+  if (!accessToken) {
+    console.error('❌ Sync failed: could not obtain access token');
+    Deno.exit(1);
+  }
+  console.log('✅ Access token obtained');
 
   const trackUris = await getRecentLikes(accessToken);
-  if (trackUris === null) { log.syncFailedNoLikes(); process.exit(1); }
+  if (trackUris === null) {
+    console.error('❌ Sync failed: could not fetch likes');
+    Deno.exit(1);
+  }
 
   const validTracks = trackUris.filter(uri => uri.length > 14);
-  if (validTracks.length !== trackUris.length) { log.syncFailedInvalidUris(trackUris.length - validTracks.length); process.exit(1); }
+  if (validTracks.length !== trackUris.length) {
+    console.error(`❌ Sync failed: ${trackUris.length - validTracks.length} invalid track URIs detected`);
+    Deno.exit(1);
+  }
 
-  if (validTracks.length === 0) { log.syncNoTracksFound(); log.syncCompletedNoChanges(); process.exit(0); }
+  if (validTracks.length === 0) {
+    console.log('ℹ️ No liked tracks found - playlist unchanged');
+    console.log('✅ Sync completed - no changes made');
+    Deno.exit(0);
+  }
 
-  const expectedCount = parseInt(process.env.TRACK_COUNT || '30', 10);
-  log.syncFetchedTracks(validTracks.length, expectedCount);
+  const expectedCount = parseInt(Deno.env.get("TRACK_COUNT") || '50', 10);
+  if (validTracks.length < expectedCount) {
+    console.log(`✅ Fetched ${validTracks.length} tracks (user has fewer than ${expectedCount} likes)`);
+  } else {
+    console.log(`✅ Fetched ${validTracks.length} tracks`);
+  }
 
   // Idempotency check: compare current playlist with new tracks
   const currentTracks = await getPlaylistTracks(accessToken);
@@ -305,26 +393,30 @@ export async function main(): Promise<void> {
   const syncTimestamp = `Last sync: ${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC`;
 
   if (currentTracks !== null && JSON.stringify(currentTracks) === JSON.stringify(validTracks)) {
-    log.playlistAlreadyUpToDate();
-    // Still update metadata (timestamp changes)
+    console.log('ℹ️ Playlist already up-to-date, skipping update');
     await updatePlaylistMetadata(accessToken, { name: playlistTitle, description: syncTimestamp });
-    log.syncSuccess(validTracks.length);
-    process.exit(0);
+    console.log(`✅ Synced ${validTracks.length} tracks to playlist`);
+    Deno.exit(0);
   }
 
-  log.syncReplacingPlaylist(validTracks.length);
+  console.log(`🔄 Replacing playlist contents with ${validTracks.length} tracks`);
 
   const updateSuccess = await updatePlaylist(accessToken, validTracks);
-  if (!updateSuccess) { log.syncFailedUpdatePlaylist(); process.exit(1); }
+  if (!updateSuccess) {
+    console.error('❌ Sync failed: could not update playlist');
+    Deno.exit(1);
+  }
 
-  // Update playlist metadata (non-fatal if fails)
   await updatePlaylistMetadata(accessToken, { name: playlistTitle, description: syncTimestamp });
 
-  log.syncSuccess(validTracks.length);
-  process.exit(0);
+  console.log(`✅ Synced ${validTracks.length} tracks to playlist`);
+  Deno.exit(0);
 }
 
 // Only run main() when executed directly (not when imported for tests)
-if (require.main === module) {
-  main().catch(() => { log.syncUnexpectedError(); process.exit(1); });
+if (import.meta.main) {
+  main().catch(() => {
+    console.error('❌ Unexpected error during execution');
+    Deno.exit(1);
+  });
 }

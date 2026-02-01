@@ -1,1665 +1,2260 @@
-// src/sync.test.ts - Tests for sync.ts functions
+// src/sync.test.ts - Tests for sync.ts functions (Deno)
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getRecentLikes, getAccessToken, updatePlaylist, updatePlaylistMetadata, getPlaylistTracks, main } from './sync';
+import { assertEquals, assertMatch } from "@std/assert";
+import { stub, type Stub, restore } from "@std/testing/mock";
+import { FakeTime } from "@std/testing/time";
+import {
+  getRecentLikes,
+  getAccessToken,
+  updatePlaylist,
+  updatePlaylistMetadata,
+  getPlaylistTracks,
+  main,
+} from "./sync.ts";
 
-// Mock fetch globally
-const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
+// Helper to create a mock Response
+function mockResponse(ok: boolean, data: unknown, status = 200): Response {
+  return {
+    ok,
+    status,
+    json: () => Promise.resolve(data),
+  } as Response;
+}
+
+// Helper to save and restore env vars
+function withEnv(
+  vars: Record<string, string | undefined>,
+  fn: () => Promise<void> | void
+): () => Promise<void> {
+  return async () => {
+    const saved: Record<string, string | undefined> = {};
+    for (const key of Object.keys(vars)) {
+      saved[key] = Deno.env.get(key);
+      const value = vars[key];
+      if (value === undefined) {
+        Deno.env.delete(key);
+      } else {
+        Deno.env.set(key, value);
+      }
+    }
+    try {
+      await fn();
+    } finally {
+      for (const key of Object.keys(saved)) {
+        const value = saved[key];
+        if (value === undefined) {
+          Deno.env.delete(key);
+        } else {
+          Deno.env.set(key, value);
+        }
+      }
+    }
+  };
+}
 
 // Suppress console output during tests
-vi.stubGlobal('console', {
-  ...console,
-  log: vi.fn(),
-  error: vi.fn(),
-  warn: vi.fn(),
+let consoleLogStub: Stub;
+let consoleErrorStub: Stub;
+let consoleWarnStub: Stub;
+
+function setupConsoleMocks() {
+  consoleLogStub = stub(console, "log");
+  consoleErrorStub = stub(console, "error");
+  consoleWarnStub = stub(console, "warn");
+}
+
+function restoreConsoleMocks() {
+  consoleLogStub.restore();
+  consoleErrorStub.restore();
+  consoleWarnStub.restore();
+}
+
+// ============================================================================
+// getRecentLikes tests
+// ============================================================================
+
+Deno.test("getRecentLikes", async (t) => {
+  await t.step(
+    "should fetch tracks from /me/tracks endpoint with default limit of 50",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:abc123" } },
+                { track: { uri: "spotify:track:def456" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+
+        assertEquals(fetchStub.calls.length, 1);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+        assertEquals((options as RequestInit).method, "GET");
+        const headers = (options as RequestInit).headers as Record<string, string>;
+        assertEquals(headers["Authorization"], "Bearer valid-token");
+        assertEquals(result, ["spotify:track:abc123", "spotify:track:def456"]);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return track URIs in spotify:track:xxx format",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:track1" } },
+                { track: { uri: "spotify:track:track2" } },
+                { track: { uri: "spotify:track:track3" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+
+        assertEquals(result?.length, 3);
+        result!.forEach((uri) => {
+          assertMatch(uri, /^spotify:track:/);
+        });
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should use TRACK_COUNT environment variable when set",
+    withEnv({ TRACK_COUNT: "50" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { items: [] }))
+      );
+
+      try {
+        await getRecentLikes("valid-token");
+
+        const [url] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should cap TRACK_COUNT at 50 when exceeds Spotify API limit",
+    withEnv({ TRACK_COUNT: "100" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { items: [] }))
+      );
+
+      try {
+        await getRecentLikes("valid-token");
+
+        const [url] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on API error",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(
+              false,
+              { error: { message: "The access token expired" } },
+              401
+            )
+          )
+      );
+
+      try {
+        const result = await getRecentLikes("invalid-token");
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on network error",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(new Error("Network error"))
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on timeout",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(abortError)
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should default to 50 when TRACK_COUNT is invalid",
+    withEnv({ TRACK_COUNT: "invalid" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { items: [] }))
+      );
+
+      try {
+        await getRecentLikes("valid-token");
+
+        const [url] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on invalid response structure",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { wrongStructure: true }))
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should filter out items with invalid track URIs",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:valid1" } },
+                { track: { uri: "spotify:episode:podcast1" } }, // Not a track
+                { track: { uri: "spotify:track:valid2" } },
+                { track: {} }, // Missing uri
+                { wrongField: {} }, // Missing track
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+        assertEquals(result, ["spotify:track:valid1", "spotify:track:valid2"]);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should default to 50 when TRACK_COUNT is less than 1",
+    withEnv({ TRACK_COUNT: "0" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { items: [] }))
+      );
+
+      try {
+        await getRecentLikes("valid-token");
+
+        const [url] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should preserve chronological order from API response (most recent first)",
+    withEnv({ TRACK_COUNT: undefined }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:newest" } },
+                { track: { uri: "spotify:track:middle" } },
+                { track: { uri: "spotify:track:oldest" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getRecentLikes("valid-token");
+        assertEquals(result, [
+          "spotify:track:newest",
+          "spotify:track:middle",
+          "spotify:track:oldest",
+        ]);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should default to 50 when TRACK_COUNT is negative",
+    withEnv({ TRACK_COUNT: "-5" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { items: [] }))
+      );
+
+      try {
+        await getRecentLikes("valid-token");
+
+        const [url] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/me/tracks?limit=50");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
 });
 
-describe('getRecentLikes', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv('TRACK_COUNT', '');
+// ============================================================================
+// getAccessToken tests
+// ============================================================================
+
+Deno.test("getAccessToken", async (t) => {
+  const defaultEnv = {
+    SPOTIFY_CLIENT_ID: "test-client-id",
+    SPOTIFY_CLIENT_SECRET: "test-client-secret",
+    SPOTIFY_REFRESH_TOKEN: "test-refresh-token",
+  };
+
+  await t.step(
+    "should return access token on successful refresh",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(mockResponse(true, { access_token: "new-access-token" }))
+      );
+
+      try {
+        const result = await getAccessToken();
+
+        assertEquals(result, "new-access-token");
+        assertEquals(fetchStub.calls.length, 1);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://accounts.spotify.com/api/token");
+        assertEquals((options as RequestInit).method, "POST");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when SPOTIFY_CLIENT_ID is missing",
+    withEnv({ ...defaultEnv, SPOTIFY_CLIENT_ID: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when SPOTIFY_CLIENT_SECRET is missing",
+    withEnv({ ...defaultEnv, SPOTIFY_CLIENT_SECRET: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when SPOTIFY_REFRESH_TOKEN is missing",
+    withEnv({ ...defaultEnv, SPOTIFY_REFRESH_TOKEN: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on API error response",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(false, { error: "invalid_grant" }, 400))
+      );
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on network error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(new Error("Network error"))
+      );
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on timeout",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      const fetchStub = stub(globalThis, "fetch", () => Promise.reject(abortError));
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when response has no access_token",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { token_type: "Bearer" }))
+      );
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when access_token is empty string",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { access_token: "   " }))
+      );
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on invalid JSON response",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.reject(new Error("Invalid JSON")),
+        } as Response)
+      );
+
+      try {
+        const result = await getAccessToken();
+        assertEquals(result, null);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+});
+
+// ============================================================================
+// updatePlaylist tests
+// ============================================================================
+
+Deno.test("updatePlaylist", async (t) => {
+  const defaultEnv = { PLAYLIST_ID: "test-playlist-id" };
+
+  await t.step(
+    "should make PUT request to Spotify playlists endpoint with track URIs",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201))
+      );
+
+      try {
+        const trackUris = ["spotify:track:abc123", "spotify:track:def456"];
+        const result = await updatePlaylist("valid-token", trackUris);
+
+        assertEquals(result, true);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(
+          url,
+          "https://api.spotify.com/v1/playlists/test-playlist-id/tracks"
+        );
+        assertEquals((options as RequestInit).method, "PUT");
+        assertEquals(
+          JSON.parse((options as RequestInit).body as string),
+          { uris: trackUris }
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return true on successful playlist update (201 response)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201))
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+        assertEquals(result, true);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should succeed with empty trackUris array (clears playlist)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201))
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", []);
+
+        assertEquals(result, true);
+        const [, options] = fetchStub.calls[0]!.args;
+        assertEquals(
+          JSON.parse((options as RequestInit).body as string),
+          { uris: [] }
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false when PLAYLIST_ID is missing",
+    withEnv({ PLAYLIST_ID: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(fetchStub.calls.length, 0);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("PLAYLIST_ID not configured")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false when PLAYLIST_ID is whitespace only",
+    withEnv({ PLAYLIST_ID: "   " }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+        assertEquals(result, false);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should return false with "Playlist not found" message on 404',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(false, { error: { status: 404, message: "Non existing id" } }, 404)
+          )
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist not found")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should return false with "Permission denied" message on 403',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(
+              false,
+              { error: { status: 403, message: "You cannot add tracks" } },
+              403
+            )
+          )
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Permission denied")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should return false with "Authentication failed" message on 401',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(
+              false,
+              { error: { status: 401, message: "The access token expired" } },
+              401
+            )
+          )
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Authentication failed")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false on network timeout",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      const fetchStub = stub(globalThis, "fetch", () => Promise.reject(abortError));
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("request timeout")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false on network error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(new Error("Network error"))
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("network error")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false on generic API error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(false, { error: { message: "Internal server error" } }, 500)
+          )
+      );
+
+      try {
+        const result = await updatePlaylist("valid-token", ["spotify:track:abc123"]);
+        assertEquals(result, false);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+});
+
+// ============================================================================
+// updatePlaylistMetadata tests
+// ============================================================================
+
+Deno.test("updatePlaylistMetadata", async (t) => {
+  const defaultEnv = { PLAYLIST_ID: "test-playlist-id" };
+
+  await t.step(
+    "should send both name and description in single request",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, {}, 200))
+      );
+
+      try {
+        await updatePlaylistMetadata("valid-token", {
+          name: "LAST30LIKED",
+          description: "Last sync: 2026-01-11 14:32:45 UTC",
+        });
+
+        assertEquals(fetchStub.calls.length, 1);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/playlists/test-playlist-id");
+        assertEquals((options as RequestInit).method, "PUT");
+        assertEquals(JSON.parse((options as RequestInit).body as string), {
+          name: "LAST30LIKED",
+          description: "Last sync: 2026-01-11 14:32:45 UTC",
+        });
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step("should format timestamp correctly as YYYY-MM-DD HH:mm:ss UTC", () => {
+    const date = new Date("2026-01-11T14:32:45.123Z");
+    const timestamp = `Last sync: ${date.toISOString().replace("T", " ").substring(0, 19)} UTC`;
+    assertEquals(timestamp, "Last sync: 2026-01-11 14:32:45 UTC");
   });
 
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
+  await t.step(
+    "should return true on successful metadata update (200 OK)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, {}, 200))
+      );
 
-  // AC #1: Returns N most recently liked tracks from /me/tracks endpoint
-  it('should fetch tracks from /me/tracks endpoint with default limit of 30', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:abc123' } },
-        { track: { uri: 'spotify:track:def456' } },
-      ],
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(result, true);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/playlists/test-playlist-id");
+        assertEquals((options as RequestInit).method, "PUT");
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false and log warning on API error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(false, {}, 500))
+      );
+
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Could not update playlist title")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false and log warning on network timeout",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      const fetchStub = stub(globalThis, "fetch", () => Promise.reject(abortError));
+
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist title update timed out")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false and log warning on network error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(new Error("Network error"))
+      );
+
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(result, false);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist title update network error")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false when PLAYLIST_ID is missing",
+    withEnv({ PLAYLIST_ID: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+        assertEquals(result, false);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false when PLAYLIST_ID is whitespace only",
+    withEnv({ PLAYLIST_ID: "   " }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+        assertEquals(result, false);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should log updating message when name is provided",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, {}, 200))
+      );
+
+      try {
+        await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Updating playlist title to LAST30LIKED")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should log success message when metadata update succeeds",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, {}, 200))
+      );
+
+      try {
+        await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist title updated")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+});
+
+// ============================================================================
+// getPlaylistTracks tests
+// ============================================================================
+
+Deno.test("getPlaylistTracks", async (t) => {
+  const defaultEnv = { PLAYLIST_ID: "test-playlist-id" };
+
+  await t.step(
+    "should fetch tracks from playlist endpoint with field filtering",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:abc123" } },
+                { track: { uri: "spotify:track:def456" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(
+          url,
+          "https://api.spotify.com/v1/playlists/test-playlist-id/tracks?fields=items(track(uri))&limit=50"
+        );
+        assertEquals((options as RequestInit).method, "GET");
+        assertEquals(result, ["spotify:track:abc123", "spotify:track:def456"]);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return track URIs in spotify:track:xxx format",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:track1" } },
+                { track: { uri: "spotify:track:track2" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result?.length, 2);
+        result!.forEach((uri) => {
+          assertMatch(uri, /^spotify:track:/);
+        });
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on timeout",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      const fetchStub = stub(globalThis, "fetch", () => Promise.reject(abortError));
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result, null);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks timed out")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on network error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.reject(new Error("Network error"))
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result, null);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks network error")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on API error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(false, {}, 401))
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result, null);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks failed")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on invalid JSON response",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.reject(new Error("Invalid JSON")),
+        } as Response)
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result, null);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks invalid format")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null on unexpected response structure",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, { wrongStructure: true }))
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+
+        assertEquals(result, null);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks unexpected structure")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when PLAYLIST_ID is missing",
+    withEnv({ PLAYLIST_ID: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+        assertEquals(result, null);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return null when PLAYLIST_ID is whitespace only",
+    withEnv({ PLAYLIST_ID: "   " }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+        assertEquals(result, null);
+        assertEquals(fetchStub.calls.length, 0);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should filter out items with invalid track URIs",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:valid1" } },
+                { track: { uri: "spotify:episode:podcast1" } }, // Not a track
+                { track: { uri: "spotify:track:valid2" } },
+                { track: {} }, // Missing uri
+                { wrongField: {} }, // Missing track
+              ],
+            })
+          )
+      );
+
+      try {
+        const result = await getPlaylistTracks("valid-token");
+        assertEquals(result, ["spotify:track:valid1", "spotify:track:valid2"]);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should log success with track count",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:abc123" } },
+                { track: { uri: "spotify:track:def456" } },
+              ],
+            })
+          )
+      );
+
+      try {
+        await getPlaylistTracks("valid-token");
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetched 2 current playlist tracks")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should log fetching message before request",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () =>
+          Promise.resolve(
+            mockResponse(true, { items: [{ track: { uri: "spotify:track:abc123" } }] })
+          )
+      );
+
+      try {
+        await getPlaylistTracks("valid-token");
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetching current playlist tracks")
+          ),
+          true
+        );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+});
+
+// ============================================================================
+// main() function tests
+// ============================================================================
+
+Deno.test("main", async (t) => {
+  const defaultEnv = {
+    SPOTIFY_CLIENT_ID: "test-client-id",
+    SPOTIFY_CLIENT_SECRET: "test-client-secret",
+    SPOTIFY_REFRESH_TOKEN: "test-refresh-token",
+    PLAYLIST_ID: "test-playlist-id",
+    TRACK_COUNT: "30",
+  };
+
+  // Helper to run main() and catch the Deno.exit call
+  async function runMainExpectingExit(
+    expectedCode: number,
+    fetchResponses: Array<() => Promise<Response>>
+  ): Promise<{ exitCode: number; fetchCalls: number }> {
+    let exitCode = -1;
+    let callIndex = 0;
+
+    const exitStub = stub(Deno, "exit", (code?: number) => {
+      exitCode = code ?? 0;
+      throw new Error(`Deno.exit(${code})`);
+    });
+
+    const fetchStub = stub(globalThis, "fetch", () => {
+      const response = fetchResponses[callIndex];
+      callIndex++;
+      return response ? response() : Promise.resolve(mockResponse(true, {}));
+    });
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof Error && e.message.startsWith("Deno.exit"))) {
+        throw e;
+      }
+    } finally {
+      exitStub.restore();
+      fetchStub.restore();
+    }
+
+    assertEquals(exitCode, expectedCode);
+    return { exitCode, fetchCalls: callIndex };
+  }
+
+  await t.step(
+    "should exit with code 1 when updatePlaylist returns false",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(1, [
+          // Token success
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          // getRecentLikes success
+          () =>
+            Promise.resolve(
+              mockResponse(true, { items: [{ track: { uri: "spotify:track:abc123" } }] })
+            ),
+          // getPlaylistTracks returns different tracks (trigger update)
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          // updatePlaylist fails
+          () =>
+            Promise.resolve(mockResponse(false, { error: { message: "Not found" } }, 404)),
+        ]);
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should exit with code 0 on successful sync",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          // Token success
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          // getRecentLikes success
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:abc123" } },
+                  { track: { uri: "spotify:track:def456" } },
+                ],
+              })
+            ),
+          // getPlaylistTracks returns different tracks
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          // updatePlaylist success
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // updatePlaylistMetadata success
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        assertEquals(fetchCalls, 5);
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should log "Synced {count} tracks to playlist" on successful sync',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:abc123" } },
+                  { track: { uri: "spotify:track:def456" } },
+                ],
+              })
+            ),
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Synced 2 tracks to playlist")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should exit with code 0 even when metadata update fails",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, { items: [{ track: { uri: "spotify:track:abc123" } }] })
+            ),
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // Metadata update fails
+          () => Promise.resolve(mockResponse(false, {}, 500)),
+        ]);
+
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Could not update playlist title")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should log "Sync failed" when token refresh fails',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(1, [
+          // Token refresh fails
+          () =>
+            Promise.resolve(mockResponse(false, { error: "invalid_grant" }, 400)),
+        ]);
+
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Sync failed: could not obtain access token")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should log "Sync failed" when credentials are missing',
+    withEnv({ ...defaultEnv, SPOTIFY_CLIENT_ID: "" }, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(1, []);
+
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Sync failed: could not obtain access token")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    'should log "Sync failed" when updatePlaylist fails',
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(1, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, { items: [{ track: { uri: "spotify:track:abc123" } }] })
+            ),
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          () =>
+            Promise.resolve(mockResponse(false, { error: { message: "Not found" } }, 404)),
+        ]);
+
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Sync failed: could not update playlist")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should fail sync when getRecentLikes fails (protect playlist from clearing)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(1, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          // getRecentLikes fails
+          () =>
+            Promise.resolve(
+              mockResponse(false, { error: { message: "Token expired" } }, 401)
+            ),
+        ]);
+
+        assertEquals(
+          consoleErrorStub.calls.some((c) =>
+            String(c.args[0]).includes("Sync failed: could not fetch likes")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should log the action before updating playlist",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:abc123" } },
+                  { track: { uri: "spotify:track:def456" } },
+                ],
+              })
+            ),
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Replacing playlist contents with 2 tracks")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should include sync timestamp description in metadata update",
+    withEnv(defaultEnv, async () => {
+      const time = new FakeTime(new Date("2026-01-11T14:32:45.000Z"));
+      setupConsoleMocks();
+
+      let capturedBody: string | undefined;
+      const exitStub = stub(Deno, "exit", (code?: number) => {
+        throw new Error(`Deno.exit(${code})`);
+      });
+
+      let callIndex = 0;
+      const fetchStub = stub(globalThis, "fetch", (url, options) => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockResponse(true, { access_token: "valid-token" }));
+        }
+        if (callIndex === 2) {
+          return Promise.resolve(
+            mockResponse(true, {
+              items: [
+                { track: { uri: "spotify:track:abc123" } },
+                { track: { uri: "spotify:track:def456" } },
+              ],
+            })
+          );
+        }
+        if (callIndex === 3) {
+          return Promise.resolve(mockResponse(true, { items: [] }));
+        }
+        if (callIndex === 4) {
+          return Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201));
+        }
+        if (callIndex === 5) {
+          capturedBody = (options as RequestInit).body as string;
+          return Promise.resolve(mockResponse(true, {}, 200));
+        }
+        return Promise.resolve(mockResponse(true, {}));
+      });
+
+      try {
+        await main();
+      } catch {
+        // Expected Deno.exit
+      } finally {
+        exitStub.restore();
+        fetchStub.restore();
+        restoreConsoleMocks();
+        time.restore();
+      }
+
+      const body = JSON.parse(capturedBody!);
+      assertEquals(body.name, "LAST2LIKED");
+      assertEquals(body.description, "Last sync: 2026-01-11 14:32:45 UTC");
+    })
+  );
+
+  await t.step(
+    "should NOT update playlist when no tracks found (safety: never clear)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          // Empty likes
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+        ]);
+
+        // Should only call token + likes (2 calls), no update
+        assertEquals(fetchCalls, 2);
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("No liked tracks found - playlist unchanged")
+          ),
+          true
+        );
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Sync completed - no changes made")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should skip update when playlist already up-to-date (idempotency)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const tracks = [
+        { track: { uri: "spotify:track:abc123" } },
+        { track: { uri: "spotify:track:def456" } },
+      ];
+
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () => Promise.resolve(mockResponse(true, { items: tracks })),
+          // Same tracks in playlist
+          () => Promise.resolve(mockResponse(true, { items: tracks })),
+          // Metadata update
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        // Should make 4 calls: token, likes, playlistTracks, metadata (no updatePlaylist)
+        assertEquals(fetchCalls, 4);
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist already up-to-date")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should proceed with update when tracks are different",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:new1" } },
+                  { track: { uri: "spotify:track:new2" } },
+                ],
+              })
+            ),
+          // Different tracks in playlist
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:old1" } },
+                  { track: { uri: "spotify:track:old2" } },
+                ],
+              })
+            ),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        // Should make 5 calls including updatePlaylist
+        assertEquals(fetchCalls, 5);
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Replacing playlist contents with 2 tracks")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should proceed with update when track order is different",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:abc123" } },
+                  { track: { uri: "spotify:track:def456" } },
+                ],
+              })
+            ),
+          // Same tracks but different order
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:def456" } },
+                  { track: { uri: "spotify:track:abc123" } },
+                ],
+              })
+            ),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        // Order matters - should proceed with update
+        assertEquals(fetchCalls, 5);
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Replacing playlist contents with 2 tracks")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should proceed with update when getPlaylistTracks fails (fail-safe)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      try {
+        const { fetchCalls } = await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () =>
+            Promise.resolve(
+              mockResponse(true, {
+                items: [
+                  { track: { uri: "spotify:track:abc123" } },
+                  { track: { uri: "spotify:track:def456" } },
+                ],
+              })
+            ),
+          // getPlaylistTracks fails
+          () => Promise.resolve(mockResponse(false, {}, 500)),
+          () =>
+            Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+        ]);
+
+        // Should proceed with update despite getPlaylistTracks failure
+        assertEquals(fetchCalls, 5);
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Fetch playlist tracks failed")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should still update metadata when skipping playlist update",
+    withEnv(defaultEnv, async () => {
+      const time = new FakeTime(new Date("2026-01-11T15:00:00.000Z"));
+      setupConsoleMocks();
+
+      const tracks = [{ track: { uri: "spotify:track:abc123" } }];
+      let capturedBody: string | undefined;
+
+      const exitStub = stub(Deno, "exit", (code?: number) => {
+        throw new Error(`Deno.exit(${code})`);
+      });
+
+      let callIndex = 0;
+      const fetchStub = stub(globalThis, "fetch", (url, options) => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockResponse(true, { access_token: "valid-token" }));
+        }
+        if (callIndex === 2) {
+          return Promise.resolve(mockResponse(true, { items: tracks }));
+        }
+        if (callIndex === 3) {
+          // Same tracks - triggers idempotent path
+          return Promise.resolve(mockResponse(true, { items: tracks }));
+        }
+        if (callIndex === 4) {
+          capturedBody = (options as RequestInit).body as string;
+          return Promise.resolve(mockResponse(true, {}, 200));
+        }
+        return Promise.resolve(mockResponse(true, {}));
+      });
+
+      try {
+        await main();
+      } catch {
+        // Expected Deno.exit
+      } finally {
+        exitStub.restore();
+        fetchStub.restore();
+        restoreConsoleMocks();
+        time.restore();
+      }
+
+      // Verify metadata call was made with correct timestamp
+      const body = JSON.parse(capturedBody!);
+      assertEquals(body.name, "LAST1LIKED");
+      assertEquals(body.description, "Last sync: 2026-01-11 15:00:00 UTC");
+    })
+  );
+
+  await t.step(
+    "should exit with code 0 when playlist up-to-date even if metadata update fails",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const tracks = [{ track: { uri: "spotify:track:abc123" } }];
+
+      try {
+        await runMainExpectingExit(0, [
+          () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
+          () => Promise.resolve(mockResponse(true, { items: tracks })),
+          // Same tracks - triggers idempotent path
+          () => Promise.resolve(mockResponse(true, { items: tracks })),
+          // Metadata update fails
+          () => Promise.resolve(mockResponse(false, {}, 500)),
+        ]);
+
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist already up-to-date")
+          ),
+          true
+        );
+        assertEquals(
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Could not update playlist title")
+          ),
+          true
+        );
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Synced 1 tracks to playlist")
+          ),
+          true
+        );
+      } finally {
+        restoreConsoleMocks();
+      }
+    })
+  );
+});
+
+// ============================================================================
+// PlaylistDetails type guard tests
+// ============================================================================
+
+Deno.test("PlaylistDetails type guard", async (t) => {
+  interface PlaylistDetails {
+    name: string;
+    description: string | null;
+    tracks: { total: number };
+  }
+
+  function isPlaylistDetails(data: unknown): data is PlaylistDetails {
+    if (!data || typeof data !== "object") return false;
+    const obj = data as Record<string, unknown>;
+    if (typeof obj.name !== "string") return false;
+    if (
+      obj.description !== null &&
+      obj.description !== undefined &&
+      typeof obj.description !== "string"
+    )
+      return false;
+    if (!obj.tracks || typeof obj.tracks !== "object") return false;
+    const tracks = obj.tracks as Record<string, unknown>;
+    if (typeof tracks.total !== "number") return false;
+    return true;
+  }
+
+  await t.step("should return true for valid PlaylistDetails with string description", () => {
+    const data = {
+      name: "LAST30LIKED",
+      description: "Last sync: 2026-01-11 14:32:45 UTC",
+      tracks: { total: 30 },
     };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=30',
-      expect.objectContaining({
-        method: 'GET',
-        headers: {
-          Authorization: 'Bearer valid-token',
-          Accept: 'application/json',
-        },
-      })
-    );
-    expect(result).toEqual(['spotify:track:abc123', 'spotify:track:def456']);
+    assertEquals(isPlaylistDetails(data), true);
   });
 
-  // AC #3: Response contains track URIs in spotify:track:xxx format
-  it('should return track URIs in spotify:track:xxx format', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:track1' } },
-        { track: { uri: 'spotify:track:track2' } },
-        { track: { uri: 'spotify:track:track3' } },
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(result).toHaveLength(3);
-    result!.forEach((uri) => {
-      expect(uri).toMatch(/^spotify:track:/);
-    });
+  await t.step("should return true for valid PlaylistDetails with null description", () => {
+    const data = { name: "LAST30LIKED", description: null, tracks: { total: 30 } };
+    assertEquals(isPlaylistDetails(data), true);
   });
 
-  // AC #4: Custom TRACK_COUNT value
-  it('should use TRACK_COUNT environment variable when set', async () => {
-    vi.stubEnv('TRACK_COUNT', '50');
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=50',
-      expect.any(Object)
-    );
+  await t.step("should return true when description field is missing entirely", () => {
+    const data = { name: "LAST30LIKED", tracks: { total: 30 } };
+    assertEquals(isPlaylistDetails(data), true);
   });
 
-  // AC #7: TRACK_COUNT > 50 should be capped at 50
-  it('should cap TRACK_COUNT at 50 when exceeds Spotify API limit', async () => {
-    vi.stubEnv('TRACK_COUNT', '100');
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=50',
-      expect.any(Object)
-    );
+  await t.step("should return false for null", () => {
+    assertEquals(isPlaylistDetails(null), false);
   });
 
-  // AC #5 & #6: Error handling - API error
-  it('should return null on API error', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { message: 'The access token expired' } }),
-    });
-
-    const result = await getRecentLikes('invalid-token');
-
-    expect(result).toBeNull();
+  await t.step("should return false for undefined", () => {
+    assertEquals(isPlaylistDetails(undefined), false);
   });
 
-  // AC #5 & #6: Error handling - Network error
-  it('should return null on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(result).toBeNull();
+  await t.step("should return false when name is not a string", () => {
+    const data = { name: 123, description: null, tracks: { total: 30 } };
+    assertEquals(isPlaylistDetails(data), false);
   });
 
-  // AC #5 & #6: Error handling - Timeout
-  it('should return null on timeout', async () => {
-    const abortError = new Error('Aborted');
-    abortError.name = 'AbortError';
-    mockFetch.mockRejectedValueOnce(abortError);
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(result).toBeNull();
+  await t.step("should return false when description is a number", () => {
+    const data = { name: "LAST30LIKED", description: 123, tracks: { total: 30 } };
+    assertEquals(isPlaylistDetails(data), false);
   });
 
-  // Edge case: Invalid TRACK_COUNT defaults to 30
-  it('should default to 30 when TRACK_COUNT is invalid', async () => {
-    vi.stubEnv('TRACK_COUNT', 'invalid');
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=30',
-      expect.any(Object)
-    );
+  await t.step("should return false when tracks is missing", () => {
+    const data = { name: "LAST30LIKED", description: null };
+    assertEquals(isPlaylistDetails(data), false);
   });
 
-  // Edge case: Invalid response structure
-  it('should return null on invalid response structure', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ wrongStructure: true }),
-    });
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(result).toBeNull();
+  await t.step("should return false when tracks.total is not a number", () => {
+    const data = { name: "LAST30LIKED", description: null, tracks: { total: "30" } };
+    assertEquals(isPlaylistDetails(data), false);
   });
 
-  // Edge case: Filters out non-track URIs
-  it('should filter out items with invalid track URIs', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:valid1' } },
-        { track: { uri: 'spotify:episode:podcast1' } }, // Not a track
-        { track: { uri: 'spotify:track:valid2' } },
-        { track: {} }, // Missing uri
-        { wrongField: {} }, // Missing track
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getRecentLikes('valid-token');
-
-    expect(result).toEqual(['spotify:track:valid1', 'spotify:track:valid2']);
-  });
-
-  // TRACK_COUNT less than 1 defaults to 30
-  it('should default to 30 when TRACK_COUNT is less than 1', async () => {
-    vi.stubEnv('TRACK_COUNT', '0');
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=30',
-      expect.any(Object)
-    );
-  });
-
-  // AC #2: Tracks are returned in chronological order (preserves API order)
-  it('should preserve chronological order from API response (most recent first)', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:newest' } },
-        { track: { uri: 'spotify:track:middle' } },
-        { track: { uri: 'spotify:track:oldest' } },
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getRecentLikes('valid-token');
-
-    // Verify order is preserved (most recent first, as returned by API)
-    expect(result).toEqual([
-      'spotify:track:newest',
-      'spotify:track:middle',
-      'spotify:track:oldest',
-    ]);
-  });
-
-  // M2: Negative TRACK_COUNT defaults to 30
-  it('should default to 30 when TRACK_COUNT is negative', async () => {
-    vi.stubEnv('TRACK_COUNT', '-5');
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await getRecentLikes('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/me/tracks?limit=30',
-      expect.any(Object)
-    );
+  await t.step("should return false for empty object", () => {
+    assertEquals(isPlaylistDetails({}), false);
   });
 });
 
-// H3: Tests for getAccessToken function
-describe('getAccessToken', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // Set up default valid env vars
-    vi.stubEnv('SPOTIFY_CLIENT_ID', 'test-client-id');
-    vi.stubEnv('SPOTIFY_CLIENT_SECRET', 'test-client-secret');
-    vi.stubEnv('SPOTIFY_REFRESH_TOKEN', 'test-refresh-token');
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  it('should return access token on successful refresh', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'new-access-token' }),
-    });
-
-    const result = await getAccessToken();
-
-    expect(result).toBe('new-access-token');
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://accounts.spotify.com/api/token',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Content-Type': 'application/x-www-form-urlencoded',
-        }),
-      })
-    );
-  });
-
-  it('should return null when SPOTIFY_CLIENT_ID is missing', async () => {
-    vi.stubEnv('SPOTIFY_CLIENT_ID', '');
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('should return null when SPOTIFY_CLIENT_SECRET is missing', async () => {
-    vi.stubEnv('SPOTIFY_CLIENT_SECRET', '');
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('should return null when SPOTIFY_REFRESH_TOKEN is missing', async () => {
-    vi.stubEnv('SPOTIFY_REFRESH_TOKEN', '');
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('should return null on API error response', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: async () => ({ error: 'invalid_grant' }),
-    });
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-
-  it('should return null on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-
-  it('should return null on timeout', async () => {
-    const abortError = new Error('Aborted');
-    abortError.name = 'AbortError';
-    mockFetch.mockRejectedValueOnce(abortError);
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-
-  it('should return null when response has no access_token', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ token_type: 'Bearer' }), // Missing access_token
-    });
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-
-  it('should return null when access_token is empty string', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: '   ' }), // Whitespace only
-    });
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-
-  it('should return null on invalid JSON response', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => { throw new Error('Invalid JSON'); },
-    });
-
-    const result = await getAccessToken();
-
-    expect(result).toBeNull();
-  });
-});
-
-// Tests for updatePlaylist function
-describe('updatePlaylist', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv('PLAYLIST_ID', 'test-playlist-id');
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  // AC #1: Replace playlist tracks via PUT /playlists/{id}/tracks
-  it('should make PUT request to Spotify playlists endpoint with track URIs', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-
-    const trackUris = ['spotify:track:abc123', 'spotify:track:def456'];
-    const result = await updatePlaylist('valid-token', trackUris);
-
-    expect(result).toBe(true);
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/playlists/test-playlist-id/tracks',
-      expect.objectContaining({
-        method: 'PUT',
-        headers: {
-          Authorization: 'Bearer valid-token',
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({ uris: trackUris }),
-      })
-    );
-  });
-
-  // AC #2: Playlist contains exactly the provided tracks in order
-  it('should return true on successful playlist update (201 response)', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(true);
-  });
-
-  // AC #7: Empty trackUris array clears the playlist (valid state)
-  it('should succeed with empty trackUris array (clears playlist)', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-
-    const result = await updatePlaylist('valid-token', []);
-
-    expect(result).toBe(true);
-    expect(mockFetch).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        body: JSON.stringify({ uris: [] }),
-      })
-    );
-  });
-
-  // AC #5: Missing PLAYLIST_ID logs specific error message
-  it('should return false with correct error message when PLAYLIST_ID is missing', async () => {
-    vi.stubEnv('PLAYLIST_ID', '');
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('PLAYLIST_ID not configured')
-    );
-  });
-
-  // AC #5: Empty PLAYLIST_ID (whitespace only)
-  it('should return false when PLAYLIST_ID is whitespace only', async () => {
-    vi.stubEnv('PLAYLIST_ID', '   ');
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  // AC #3 & #4: 404 error with context-specific message
-  it('should return false with "Playlist not found" message on 404', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      json: async () => ({ error: { status: 404, message: 'Non existing id' } }),
-    });
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Playlist not found')
-    );
-  });
-
-  // AC #3 & #4: 403 error with context-specific message
-  it('should return false with "Permission denied" message on 403', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 403,
-      json: async () => ({ error: { status: 403, message: "You cannot add tracks" } }),
-    });
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Permission denied')
-    );
-  });
-
-  // AC #3 & #4: 401 error with context-specific message
-  it('should return false with "Authentication failed" message on 401', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { status: 401, message: 'The access token expired' } }),
-    });
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Authentication failed')
-    );
-  });
-
-  // AC #3 & #4: Network timeout
-  it('should return false on network timeout', async () => {
-    const abortError = new Error('Aborted');
-    abortError.name = 'AbortError';
-    mockFetch.mockRejectedValueOnce(abortError);
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('request timeout')
-    );
-  });
-
-  // AC #3 & #4: Network error
-  it('should return false on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('network error')
-    );
-  });
-
-  // Generic API error
-  it('should return false on generic API error', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      json: async () => ({ error: { message: 'Internal server error' } }),
-    });
-
-    const result = await updatePlaylist('valid-token', ['spotify:track:abc123']);
-
-    expect(result).toBe(false);
-  });
-});
-
-// Tests for updatePlaylistMetadata function
-describe('updatePlaylistMetadata', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv('PLAYLIST_ID', 'test-playlist-id');
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  // Story 4.2 AC #5: sends both name and description in single API call
-  it('should send both name and description in single request', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', {
-      name: 'LAST30LIKED',
-      description: 'Last sync: 2026-01-11 14:32:45 UTC',
-    });
-
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/playlists/test-playlist-id',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({
-          name: 'LAST30LIKED',
-          description: 'Last sync: 2026-01-11 14:32:45 UTC',
-        }),
-      })
-    );
-  });
-
-  // Story 4.2 AC #1, #2: description format is correct
-  it('should format timestamp correctly as YYYY-MM-DD HH:mm:ss UTC', () => {
-    const date = new Date('2026-01-11T14:32:45.123Z');
-    const timestamp = `Last sync: ${date.toISOString().replace('T', ' ').substring(0, 19)} UTC`;
-    expect(timestamp).toBe('Last sync: 2026-01-11 14:32:45 UTC');
-  });
-
-  // AC #1: Successful playlist title update (200 response)
-  it('should return true on successful metadata update (200 OK)', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-    });
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(true);
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/playlists/test-playlist-id',
-      expect.objectContaining({
-        method: 'PUT',
-        headers: {
-          Authorization: 'Bearer valid-token',
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({ name: 'LAST30LIKED' }),
-      })
-    );
-  });
-
-  // AC #2: Title format is correct for 30 tracks
-  it('should send correct title format LAST30LIKED', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        body: JSON.stringify({ name: 'LAST30LIKED' }),
-      })
-    );
-  });
-
-  // AC #3: Title format for different counts (25 tracks)
-  it('should send correct title format LAST25LIKED for 25 tracks', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', { name: 'LAST25LIKED' });
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        body: JSON.stringify({ name: 'LAST25LIKED' }),
-      })
-    );
-  });
-
-  // AC #3: Title format for different counts (50 tracks)
-  it('should send correct title format LAST50LIKED for 50 tracks', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', { name: 'LAST50LIKED' });
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        body: JSON.stringify({ name: 'LAST50LIKED' }),
-      })
-    );
-  });
-
-  // AC #4 & #5: Metadata update failure logs warning but returns false
-  it('should return false and log warning on API error', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-    });
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Could not update playlist title')
-    );
-  });
-
-  // AC #4 & #5: Network timeout logs warning but returns false
-  it('should return false and log warning on network timeout', async () => {
-    const abortError = new Error('Aborted');
-    abortError.name = 'AbortError';
-    mockFetch.mockRejectedValueOnce(abortError);
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Playlist title update timed out')
-    );
-  });
-
-  // AC #4 & #5: 403 error logs warning but returns false
-  it('should return false and log warning on 403 forbidden', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 403,
-    });
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Could not update playlist title')
-    );
-  });
-
-  // AC #4 & #5: 401 error logs warning but returns false
-  it('should return false and log warning on 401 unauthorized', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-    });
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Could not update playlist title')
-    );
-  });
-
-  // AC #4 & #5: Network error logs warning but returns false
-  it('should return false and log warning on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Playlist title update network error')
-    );
-  });
-
-  // Missing PLAYLIST_ID returns false
-  it('should return false when PLAYLIST_ID is missing', async () => {
-    vi.stubEnv('PLAYLIST_ID', '');
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  // Whitespace PLAYLIST_ID returns false
-  it('should return false when PLAYLIST_ID is whitespace only', async () => {
-    vi.stubEnv('PLAYLIST_ID', '   ');
-
-    const result = await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  // Logs updating message when name is provided
-  it('should log updating message when name is provided', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(console.log).toHaveBeenCalledWith('🔄 Updating playlist title to LAST30LIKED...');
-  });
-
-  // Logs success message when metadata update succeeds
-  it('should log success message when metadata update succeeds', async () => {
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await updatePlaylistMetadata('valid-token', { name: 'LAST30LIKED' });
-
-    expect(console.log).toHaveBeenCalledWith('✅ Playlist title updated');
-  });
-});
-
-// Tests for getPlaylistTracks function (Story 3.5)
-describe('getPlaylistTracks', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv('PLAYLIST_ID', 'test-playlist-id');
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  // AC #1: Successfully fetches current playlist tracks
-  it('should fetch tracks from playlist endpoint with field filtering', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:abc123' } },
-        { track: { uri: 'spotify:track:def456' } },
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://api.spotify.com/v1/playlists/test-playlist-id/tracks?fields=items(track(uri))&limit=50',
-      expect.objectContaining({
-        method: 'GET',
-        headers: {
-          Authorization: 'Bearer valid-token',
-          Accept: 'application/json',
-        },
-      })
-    );
-    expect(result).toEqual(['spotify:track:abc123', 'spotify:track:def456']);
-  });
-
-  // AC #1: Returns track URIs in correct format
-  it('should return track URIs in spotify:track:xxx format', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:track1' } },
-        { track: { uri: 'spotify:track:track2' } },
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toHaveLength(2);
-    result!.forEach((uri) => {
-      expect(uri).toMatch(/^spotify:track:/);
-    });
-  });
-
-  // AC #3: Returns null on timeout (fail-safe)
-  it('should return null on timeout', async () => {
-    const abortError = new Error('Aborted');
-    abortError.name = 'AbortError';
-    mockFetch.mockRejectedValueOnce(abortError);
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks timed out')
-    );
-  });
-
-  // AC #3: Returns null on network error (fail-safe)
-  it('should return null on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network error'));
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks network error')
-    );
-  });
-
-  // AC #3: Returns null on API error (fail-safe)
-  it('should return null on API error', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks failed')
-    );
-  });
-
-  // AC #3: Returns null on invalid JSON (fail-safe)
-  it('should return null on invalid JSON response', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => { throw new Error('Invalid JSON'); },
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks invalid format')
-    );
-  });
-
-  // AC #3: Returns null on unexpected structure (fail-safe)
-  it('should return null on unexpected response structure', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ wrongStructure: true }),
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks unexpected structure')
-    );
-  });
-
-  // Returns null when PLAYLIST_ID is missing
-  it('should return null when PLAYLIST_ID is missing', async () => {
-    vi.stubEnv('PLAYLIST_ID', '');
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  // Returns null when PLAYLIST_ID is whitespace only
-  it('should return null when PLAYLIST_ID is whitespace only', async () => {
-    vi.stubEnv('PLAYLIST_ID', '   ');
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  // Filters out non-track URIs
-  it('should filter out items with invalid track URIs', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:valid1' } },
-        { track: { uri: 'spotify:episode:podcast1' } }, // Not a track
-        { track: { uri: 'spotify:track:valid2' } },
-        { track: {} }, // Missing uri
-        { wrongField: {} }, // Missing track
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    const result = await getPlaylistTracks('valid-token');
-
-    expect(result).toEqual(['spotify:track:valid1', 'spotify:track:valid2']);
-  });
-
-  // Logs success with track count
-  it('should log success with track count', async () => {
-    const mockResponse = {
-      items: [
-        { track: { uri: 'spotify:track:abc123' } },
-        { track: { uri: 'spotify:track:def456' } },
-      ],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    await getPlaylistTracks('valid-token');
-
-    expect(console.log).toHaveBeenCalledWith('✅ Fetched 2 current playlist tracks');
-  });
-
-  // Logs fetching message before request
-  it('should log fetching message before request', async () => {
-    const mockResponse = {
-      items: [{ track: { uri: 'spotify:track:abc123' } }],
-    };
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockResponse,
-    });
-
-    await getPlaylistTracks('valid-token');
-
-    expect(console.log).toHaveBeenCalledWith('🔄 Fetching current playlist tracks...');
-  });
-});
-
-// Tests for main() function with updatePlaylist integration
-describe('main', () => {
-  // Mock process.exit to throw an error so execution stops (simulating real behavior)
-  const mockExit = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
-    throw new Error(`process.exit(${code})`);
-  });
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv('SPOTIFY_CLIENT_ID', 'test-client-id');
-    vi.stubEnv('SPOTIFY_CLIENT_SECRET', 'test-client-secret');
-    vi.stubEnv('SPOTIFY_REFRESH_TOKEN', 'test-refresh-token');
-    vi.stubEnv('PLAYLIST_ID', 'test-playlist-id');
-    vi.stubEnv('TRACK_COUNT', '30');
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  // AC #6: Exit code 1 when updatePlaylist fails
-  it('should exit with code 1 when updatePlaylist returns false', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [{ track: { uri: 'spotify:track:abc123' } }],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock failed updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      json: async () => ({ error: { message: 'Not found' } }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // Exit code 1 when updatePlaylist fails with 401 (token expired)
-  it('should exit with code 1 when updatePlaylist fails with 401', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [{ track: { uri: 'spotify:track:abc123' } }],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock failed updatePlaylist with 401
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { message: 'The access token expired' } }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // Exit code 1 when updatePlaylist fails with 403 (permission denied)
-  it('should exit with code 1 when updatePlaylist fails with 403', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [{ track: { uri: 'spotify:track:abc123' } }],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock failed updatePlaylist with 403
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 403,
-      json: async () => ({ error: { message: 'You cannot add tracks to this playlist' } }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // Successful full flow
-  it('should exit with code 0 on successful sync', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  // AC #1: Successful sync logs "Synced {count} tracks to playlist"
-  it('should log "Synced {count} tracks to playlist" on successful sync', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    expect(console.log).toHaveBeenCalledWith('✅ Synced 2 tracks to playlist');
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  // AC #4: Sync succeeds even when metadata update fails
-  it('should exit with code 0 even when metadata update fails', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [{ track: { uri: 'spotify:track:abc123' } }],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock FAILED updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Could not update playlist title')
-    );
-    expect(console.log).toHaveBeenCalledWith('✅ Synced 1 tracks to playlist');
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  // AC #3: Token failure logs "Sync failed" message
-  it('should log "Sync failed" when token refresh fails', async () => {
-    // Token refresh fails
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: async () => ({ error: 'invalid_grant' }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-
-    expect(console.error).toHaveBeenCalledWith('❌ Sync failed: could not obtain access token');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // AC #3: Token failure when missing credentials
-  it('should log "Sync failed" when credentials are missing', async () => {
-    vi.stubEnv('SPOTIFY_CLIENT_ID', '');
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-
-    expect(console.error).toHaveBeenCalledWith('❌ Sync failed: could not obtain access token');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // AC #3: Playlist update failure logs "Sync failed" message
-  it('should log "Sync failed" when updatePlaylist fails', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [{ track: { uri: 'spotify:track:abc123' } }],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock failed updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      json: async () => ({ error: { message: 'Not found' } }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-
-    expect(console.error).toHaveBeenCalledWith('❌ Sync failed: could not update playlist');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // AC #3: getRecentLikes API failure should fail the sync (protect playlist)
-  it('should fail sync when getRecentLikes fails (protect playlist from clearing)', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock failed getRecentLikes (API error)
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { message: 'Token expired' } }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(1)');
-
-    // Sync should fail (exit 1) to protect the playlist from being cleared
-    expect(console.error).toHaveBeenCalledWith('❌ Sync failed: could not fetch likes');
-    expect(mockExit).toHaveBeenCalledWith(1);
-  });
-
-  // Validation: logs action before updating playlist
-  it('should log the action before updating playlist', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes with 2 tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should log the action we're about to take
-    expect(console.log).toHaveBeenCalledWith('🔄 Action: replacing playlist contents with 2 tracks');
-  });
-
-  // Story 4.2: main() includes description in metadata update
-  it('should include sync timestamp description in metadata update', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-01-11T14:32:45.000Z'));
-
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes with 2 tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Verify the 5th fetch call (updatePlaylistMetadata) includes description
-    const metadataCall = mockFetch.mock.calls[4];
-    expect(metadataCall).toBeDefined();
-    const body = JSON.parse(metadataCall![1].body);
-    expect(body.name).toBe('LAST2LIKED');
-    expect(body.description).toBe('Last sync: 2026-01-11 14:32:45 UTC');
-
-    vi.useRealTimers();
-  });
-
-  // New test: logs playlist title update
-  it('should log playlist title update during successful sync', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes with 2 tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning different tracks (to trigger update)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should log the playlist title update
-    expect(console.log).toHaveBeenCalledWith('🔄 Updating playlist title to LAST2LIKED...');
-    expect(console.log).toHaveBeenCalledWith('✅ Playlist title updated');
-  });
-
-  // SAFETY: Empty likes does NOT update playlist (never clear)
-  it('should NOT update playlist when no tracks found (safety: never clear)', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock empty getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: [] }),
-    });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should NOT call updatePlaylist - only 2 API calls (token + likes)
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(console.log).toHaveBeenCalledWith('ℹ️ No liked tracks found - playlist unchanged (safety: never clear)');
-    expect(console.log).toHaveBeenCalledWith('✅ Sync completed - no changes made');
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  // Story 3.5 AC #1: Skip update when playlist already contains same tracks
-  it('should skip update when playlist already up-to-date (idempotency)', async () => {
-    const tracks = [
-      { track: { uri: 'spotify:track:abc123' } },
-      { track: { uri: 'spotify:track:def456' } },
+// ============================================================================
+// Description verification logic tests
+// ============================================================================
+
+Deno.test("Description verification logic", async (t) => {
+  await t.step("should recognize valid sync timestamp format", () => {
+    const description = "Last sync: 2026-01-11 14:32:45 UTC";
+    assertEquals(description.startsWith("Last sync:"), true);
+  });
+
+  await t.step("should recognize description starting with Last sync:", () => {
+    const validDescriptions = [
+      "Last sync: 2026-01-11 14:32:45 UTC",
+      "Last sync: 2025-12-31 23:59:59 UTC",
+      "Last sync: 2020-01-01 00:00:00 UTC",
     ];
-
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
+    validDescriptions.forEach((desc) => {
+      assertEquals(desc.startsWith("Last sync:"), true);
     });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock getPlaylistTracks returning SAME tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock successful updatePlaylistMetadata (still updates timestamp)
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should only make 4 calls: token, likes, playlistTracks, metadata
-    // Should NOT call updatePlaylist (PUT /playlists/{id}/tracks)
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-    expect(console.log).toHaveBeenCalledWith('ℹ️ Playlist already up-to-date, skipping update');
-    expect(console.log).toHaveBeenCalledWith('✅ Synced 2 tracks to playlist');
-    expect(mockExit).toHaveBeenCalledWith(0);
   });
 
-  // Story 3.5 AC #2: Proceed with update when tracks are different
-  it('should proceed with update when tracks are different', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
+  await t.step("should reject descriptions not starting with Last sync:", () => {
+    const invalidDescriptions = [
+      "Sync: 2026-01-11 14:32:45 UTC",
+      "Updated: 2026-01-11",
+      "",
+      "Random description",
+    ];
+    invalidDescriptions.forEach((desc) => {
+      assertEquals(desc.startsWith("Last sync:"), false);
     });
-    // Mock successful getRecentLikes (new tracks)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:new1' } },
-          { track: { uri: 'spotify:track:new2' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning DIFFERENT tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:old1' } },
-          { track: { uri: 'spotify:track:old2' } },
-        ],
-      }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should make 5 calls: token, likes, playlistTracks, updatePlaylist, metadata
-    expect(mockFetch).toHaveBeenCalledTimes(5);
-    expect(console.log).toHaveBeenCalledWith('🔄 Action: replacing playlist contents with 2 tracks');
-    expect(console.log).toHaveBeenCalledWith('✅ Synced 2 tracks to playlist');
-    expect(mockExit).toHaveBeenCalledWith(0);
   });
 
-  // Story 3.5 AC #2: Proceed with update when order is different
-  it('should proceed with update when track order is different', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes (same tracks, different order)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks returning SAME tracks in DIFFERENT order
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:def456' } },
-          { track: { uri: 'spotify:track:abc123' } },
-        ],
-      }),
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Order matters - should proceed with update
-    expect(mockFetch).toHaveBeenCalledTimes(5);
-    expect(console.log).toHaveBeenCalledWith('🔄 Action: replacing playlist contents with 2 tracks');
-    expect(mockExit).toHaveBeenCalledWith(0);
+  await t.step("should handle null description", () => {
+    const checkDescription = (desc: string | null): boolean => {
+      return desc !== null && desc.startsWith("Last sync:");
+    };
+    assertEquals(checkDescription(null), false);
+    assertEquals(checkDescription("Last sync: 2026-01-11 14:32:45 UTC"), true);
+    assertEquals(checkDescription("Other description"), false);
   });
 
-  // Story 3.5 AC #3: Proceed with update when getPlaylistTracks fails (fail-safe)
-  it('should proceed with update when getPlaylistTracks fails (fail-safe)', async () => {
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        items: [
-          { track: { uri: 'spotify:track:abc123' } },
-          { track: { uri: 'spotify:track:def456' } },
-        ],
-      }),
-    });
-    // Mock getPlaylistTracks FAILING
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-    });
-    // Mock successful updatePlaylist
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ snapshot_id: 'snapshot123' }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should proceed with update despite getPlaylistTracks failure
-    expect(mockFetch).toHaveBeenCalledTimes(5);
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Fetch playlist tracks failed')
-    );
-    expect(console.log).toHaveBeenCalledWith('🔄 Action: replacing playlist contents with 2 tracks');
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  // Story 3.5: Still updates metadata when skipping playlist update
-  it('should still update metadata when skipping playlist update', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-01-11T15:00:00.000Z'));
-
-    const tracks = [{ track: { uri: 'spotify:track:abc123' } }];
-
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock getPlaylistTracks returning SAME tracks
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock successful updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Verify metadata call was made with correct timestamp
-    const metadataCall = mockFetch.mock.calls[3];
-    expect(metadataCall).toBeDefined();
-    expect(metadataCall![0]).toBe('https://api.spotify.com/v1/playlists/test-playlist-id');
-    const body = JSON.parse(metadataCall![1].body);
-    expect(body.name).toBe('LAST1LIKED');
-    expect(body.description).toBe('Last sync: 2026-01-11 15:00:00 UTC');
-
-    vi.useRealTimers();
-  });
-
-  // Story 3.5: Exit success even when metadata fails during idempotent skip
-  it('should exit with code 0 when playlist up-to-date even if metadata update fails', async () => {
-    const tracks = [{ track: { uri: 'spotify:track:abc123' } }];
-
-    // Mock successful token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ access_token: 'valid-token' }),
-    });
-    // Mock successful getRecentLikes
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock getPlaylistTracks returning SAME tracks (triggers idempotent path)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ items: tracks }),
-    });
-    // Mock FAILED updatePlaylistMetadata
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-
-    await expect(main()).rejects.toThrow('process.exit(0)');
-
-    // Should still succeed (metadata is non-fatal)
-    expect(console.log).toHaveBeenCalledWith('ℹ️ Playlist already up-to-date, skipping update');
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Warning: Could not update playlist title')
-    );
-    expect(console.log).toHaveBeenCalledWith('✅ Synced 1 tracks to playlist');
-    expect(mockExit).toHaveBeenCalledWith(0);
+  await t.step("should validate timestamp format YYYY-MM-DD HH:mm:ss UTC", () => {
+    const timestampPattern = /^Last sync: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/;
+    assertEquals(timestampPattern.test("Last sync: 2026-01-11 14:32:45 UTC"), true);
+    assertEquals(timestampPattern.test("Last sync: 2026-01-11 14:32 UTC"), false);
+    assertEquals(timestampPattern.test("Last sync: 2026-01-11T14:32:45 UTC"), false);
   });
 });

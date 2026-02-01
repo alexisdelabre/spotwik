@@ -1,6 +1,9 @@
-name: Spotwik LASTXLIKED Sync
+name: Spotwik "LASTXLIKED" Playlist Sync
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
@@ -31,6 +34,7 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+          cache: true
 
       - name: Sync playlist
         run: deno run --allow-net --allow-env src/sync.ts

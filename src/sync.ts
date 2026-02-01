@@ -290,16 +290,16 @@ export async function updatePlaylist(accessToken: string, trackUris: string[]): 
 }
 
 /**
- * Updates playlist metadata (name and/or description).
+ * Updates playlist title.
  * Failure is non-fatal - logs warning but doesn't fail the sync.
  *
  * @param accessToken - Valid Spotify access token
- * @param metadata - Object with optional name and description
+ * @param title - New playlist title
  * @returns true on success, false on failure
  */
-export async function updatePlaylistMetadata(
+export async function updatePlaylistTitle(
   accessToken: string,
-  metadata: { name?: string; description?: string }
+  title: string
 ): Promise<boolean> {
   const playlistId = Deno.env.get("PLAYLIST_ID");
 
@@ -308,9 +308,7 @@ export async function updatePlaylistMetadata(
     return false;
   }
 
-  if (metadata.name) {
-    console.log(`🔄 Updating playlist title to ${metadata.name}...`);
-  }
+  console.log(`🔄 Updating playlist title to ${title}...`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -324,7 +322,7 @@ export async function updatePlaylistMetadata(
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify(metadata),
+      body: JSON.stringify({ name: title }),
       signal: controller.signal,
     });
   } catch (error) {
@@ -343,9 +341,60 @@ export async function updatePlaylistMetadata(
     return false;
   }
 
-  if (metadata.name) {
-    console.log('✅ Playlist title updated');
+  console.log('✅ Playlist title updated');
+  return true;
+}
+
+/**
+ * Updates playlist description.
+ * Failure is non-fatal - logs warning but doesn't fail the sync.
+ *
+ * @param accessToken - Valid Spotify access token
+ * @param description - New playlist description
+ * @returns true on success, false on failure
+ */
+export async function updatePlaylistDescription(
+  accessToken: string,
+  description: string
+): Promise<boolean> {
+  const playlistId = Deno.env.get("PLAYLIST_ID");
+
+  if (!playlistId || playlistId.trim() === '') {
+    console.error('❌ PLAYLIST_ID not configured');
+    return false;
   }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ description }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.warn('⚠️ Playlist description update timed out');
+    } else {
+      console.warn('⚠️ Playlist description update network error');
+    }
+    return false;
+  }
+  clearTimeout(timeoutId);
+
+  if (!response.ok) {
+    console.warn('⚠️ Could not update playlist description');
+    return false;
+  }
+
   return true;
 }
 
@@ -362,7 +411,12 @@ export async function main(): Promise<void> {
   }
   console.log('✅ Access token obtained');
 
-  const trackUris = await getRecentLikes(accessToken);
+  // Fetch likes and current playlist in parallel for speed
+  const [trackUris, currentTracks] = await Promise.all([
+    getRecentLikes(accessToken),
+    getPlaylistTracks(accessToken),
+  ]);
+
   if (trackUris === null) {
     console.error('❌ Sync failed: could not fetch likes');
     Deno.exit(1);
@@ -387,27 +441,29 @@ export async function main(): Promise<void> {
     console.log(`✅ Fetched ${validTracks.length} tracks`);
   }
 
-  // Idempotency check: compare current playlist with new tracks
-  const currentTracks = await getPlaylistTracks(accessToken);
+  // Idempotency check: only update tracks if they changed
+  const needsUpdate = currentTracks === null || JSON.stringify(currentTracks) !== JSON.stringify(validTracks);
+
+  if (needsUpdate) {
+    console.log(`🔄 Replacing playlist contents with ${validTracks.length} tracks`);
+    const updateSuccess = await updatePlaylist(accessToken, validTracks);
+    if (!updateSuccess) {
+      console.error('❌ Sync failed: could not update playlist');
+      Deno.exit(1);
+    }
+  } else {
+    console.log('ℹ️ Playlist already up-to-date, skipping track update');
+  }
+
+  // Update title only if track count changed
   const playlistTitle = `LAST${validTracks.length}LIKED`;
-  const syncTimestamp = `Last sync: ${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC`;
-
-  if (currentTracks !== null && JSON.stringify(currentTracks) === JSON.stringify(validTracks)) {
-    console.log('ℹ️ Playlist already up-to-date, skipping update');
-    await updatePlaylistMetadata(accessToken, { name: playlistTitle, description: syncTimestamp });
-    console.log(`✅ Synced ${validTracks.length} tracks to playlist`);
-    Deno.exit(0);
+  if (needsUpdate) {
+    await updatePlaylistTitle(accessToken, playlistTitle);
   }
 
-  console.log(`🔄 Replacing playlist contents with ${validTracks.length} tracks`);
-
-  const updateSuccess = await updatePlaylist(accessToken, validTracks);
-  if (!updateSuccess) {
-    console.error('❌ Sync failed: could not update playlist');
-    Deno.exit(1);
-  }
-
-  await updatePlaylistMetadata(accessToken, { name: playlistTitle, description: syncTimestamp });
+  // Always update description with check timestamp
+  const checkTimestamp = `Checked: ${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC`;
+  await updatePlaylistDescription(accessToken, checkTimestamp);
 
   console.log(`✅ Synced ${validTracks.length} tracks to playlist`);
   Deno.exit(0);

@@ -7,7 +7,8 @@ import {
   getRecentLikes,
   getAccessToken,
   updatePlaylist,
-  updatePlaylistMetadata,
+  updatePlaylistTitle,
+  updatePlaylistDescription,
   getPlaylistTracks,
   main,
 } from "./sync.ts";
@@ -919,14 +920,14 @@ Deno.test("updatePlaylist", async (t) => {
 });
 
 // ============================================================================
-// updatePlaylistMetadata tests
+// updatePlaylistTitle tests
 // ============================================================================
 
-Deno.test("updatePlaylistMetadata", async (t) => {
+Deno.test("updatePlaylistTitle", async (t) => {
   const defaultEnv = { PLAYLIST_ID: "test-playlist-id" };
 
   await t.step(
-    "should send both name and description in single request",
+    "should send title in request body",
     withEnv(defaultEnv, async () => {
       setupConsoleMocks();
       const fetchStub = stub(
@@ -936,10 +937,7 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       );
 
       try {
-        await updatePlaylistMetadata("valid-token", {
-          name: "LAST30LIKED",
-          description: "Last sync: 2026-01-11 14:32:45 UTC",
-        });
+        await updatePlaylistTitle("valid-token", "LAST30LIKED");
 
         assertEquals(fetchStub.calls.length, 1);
         const [url, options] = fetchStub.calls[0]!.args;
@@ -947,7 +945,6 @@ Deno.test("updatePlaylistMetadata", async (t) => {
         assertEquals((options as RequestInit).method, "PUT");
         assertEquals(JSON.parse((options as RequestInit).body as string), {
           name: "LAST30LIKED",
-          description: "Last sync: 2026-01-11 14:32:45 UTC",
         });
       } finally {
         fetchStub.restore();
@@ -956,14 +953,8 @@ Deno.test("updatePlaylistMetadata", async (t) => {
     })
   );
 
-  await t.step("should format timestamp correctly as YYYY-MM-DD HH:mm:ss UTC", () => {
-    const date = new Date("2026-01-11T14:32:45.123Z");
-    const timestamp = `Last sync: ${date.toISOString().replace("T", " ").substring(0, 19)} UTC`;
-    assertEquals(timestamp, "Last sync: 2026-01-11 14:32:45 UTC");
-  });
-
   await t.step(
-    "should return true on successful metadata update (200 OK)",
+    "should return true on successful update (200 OK)",
     withEnv(defaultEnv, async () => {
       setupConsoleMocks();
       const fetchStub = stub(
@@ -973,12 +964,8 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       );
 
       try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-
+        const result = await updatePlaylistTitle("valid-token", "LAST30LIKED");
         assertEquals(result, true);
-        const [url, options] = fetchStub.calls[0]!.args;
-        assertEquals(url, "https://api.spotify.com/v1/playlists/test-playlist-id");
-        assertEquals((options as RequestInit).method, "PUT");
       } finally {
         fetchStub.restore();
         restoreConsoleMocks();
@@ -997,8 +984,7 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       );
 
       try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-
+        const result = await updatePlaylistTitle("valid-token", "LAST30LIKED");
         assertEquals(result, false);
         assertEquals(
           consoleWarnStub.calls.some((c) =>
@@ -1022,39 +1008,11 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       const fetchStub = stub(globalThis, "fetch", () => Promise.reject(abortError));
 
       try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-
+        const result = await updatePlaylistTitle("valid-token", "LAST30LIKED");
         assertEquals(result, false);
         assertEquals(
           consoleWarnStub.calls.some((c) =>
             String(c.args[0]).includes("Playlist title update timed out")
-          ),
-          true
-        );
-      } finally {
-        fetchStub.restore();
-        restoreConsoleMocks();
-      }
-    })
-  );
-
-  await t.step(
-    "should return false and log warning on network error",
-    withEnv(defaultEnv, async () => {
-      setupConsoleMocks();
-      const fetchStub = stub(
-        globalThis,
-        "fetch",
-        () => Promise.reject(new Error("Network error"))
-      );
-
-      try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-
-        assertEquals(result, false);
-        assertEquals(
-          consoleWarnStub.calls.some((c) =>
-            String(c.args[0]).includes("Playlist title update network error")
           ),
           true
         );
@@ -1072,7 +1030,7 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
 
       try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+        const result = await updatePlaylistTitle("valid-token", "LAST30LIKED");
         assertEquals(result, false);
         assertEquals(fetchStub.calls.length, 0);
       } finally {
@@ -1083,24 +1041,7 @@ Deno.test("updatePlaylistMetadata", async (t) => {
   );
 
   await t.step(
-    "should return false when PLAYLIST_ID is whitespace only",
-    withEnv({ PLAYLIST_ID: "   " }, async () => {
-      setupConsoleMocks();
-      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
-
-      try {
-        const result = await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-        assertEquals(result, false);
-        assertEquals(fetchStub.calls.length, 0);
-      } finally {
-        fetchStub.restore();
-        restoreConsoleMocks();
-      }
-    })
-  );
-
-  await t.step(
-    "should log updating message when name is provided",
+    "should log updating and success messages",
     withEnv(defaultEnv, async () => {
       setupConsoleMocks();
       const fetchStub = stub(
@@ -1110,23 +1051,36 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       );
 
       try {
-        await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
-
+        await updatePlaylistTitle("valid-token", "LAST30LIKED");
         assertEquals(
           consoleLogStub.calls.some((c) =>
             String(c.args[0]).includes("Updating playlist title to LAST30LIKED")
           ),
           true
         );
+        assertEquals(
+          consoleLogStub.calls.some((c) =>
+            String(c.args[0]).includes("Playlist title updated")
+          ),
+          true
+        );
       } finally {
         fetchStub.restore();
         restoreConsoleMocks();
       }
     })
   );
+});
+
+// ============================================================================
+// updatePlaylistDescription tests
+// ============================================================================
+
+Deno.test("updatePlaylistDescription", async (t) => {
+  const defaultEnv = { PLAYLIST_ID: "test-playlist-id" };
 
   await t.step(
-    "should log success message when metadata update succeeds",
+    "should send description in request body",
     withEnv(defaultEnv, async () => {
       setupConsoleMocks();
       const fetchStub = stub(
@@ -1136,14 +1090,84 @@ Deno.test("updatePlaylistMetadata", async (t) => {
       );
 
       try {
-        await updatePlaylistMetadata("valid-token", { name: "LAST30LIKED" });
+        await updatePlaylistDescription("valid-token", "Checked: 2026-01-11 14:32:45 UTC");
 
+        assertEquals(fetchStub.calls.length, 1);
+        const [url, options] = fetchStub.calls[0]!.args;
+        assertEquals(url, "https://api.spotify.com/v1/playlists/test-playlist-id");
+        assertEquals((options as RequestInit).method, "PUT");
+        assertEquals(JSON.parse((options as RequestInit).body as string), {
+          description: "Checked: 2026-01-11 14:32:45 UTC",
+        });
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step("should format timestamp correctly as YYYY-MM-DD HH:mm:ss UTC", () => {
+    const date = new Date("2026-01-11T14:32:45.123Z");
+    const timestamp = `Checked: ${date.toISOString().replace("T", " ").substring(0, 19)} UTC`;
+    assertEquals(timestamp, "Checked: 2026-01-11 14:32:45 UTC");
+  });
+
+  await t.step(
+    "should return true on successful update (200 OK)",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(true, {}, 200))
+      );
+
+      try {
+        const result = await updatePlaylistDescription("valid-token", "Checked: 2026-01-11 UTC");
+        assertEquals(result, true);
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false and log warning on API error",
+    withEnv(defaultEnv, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(
+        globalThis,
+        "fetch",
+        () => Promise.resolve(mockResponse(false, {}, 500))
+      );
+
+      try {
+        const result = await updatePlaylistDescription("valid-token", "Checked: 2026-01-11 UTC");
+        assertEquals(result, false);
         assertEquals(
-          consoleLogStub.calls.some((c) =>
-            String(c.args[0]).includes("Playlist title updated")
+          consoleWarnStub.calls.some((c) =>
+            String(c.args[0]).includes("Could not update playlist description")
           ),
           true
         );
+      } finally {
+        fetchStub.restore();
+        restoreConsoleMocks();
+      }
+    })
+  );
+
+  await t.step(
+    "should return false when PLAYLIST_ID is missing",
+    withEnv({ PLAYLIST_ID: "" }, async () => {
+      setupConsoleMocks();
+      const fetchStub = stub(globalThis, "fetch", () => Promise.resolve(mockResponse(true, {})));
+
+      try {
+        const result = await updatePlaylistDescription("valid-token", "Checked: 2026-01-11 UTC");
+        assertEquals(result, false);
+        assertEquals(fetchStub.calls.length, 0);
       } finally {
         fetchStub.restore();
         restoreConsoleMocks();
@@ -1570,7 +1594,7 @@ Deno.test("main", async (t) => {
         const { fetchCalls } = await runMainExpectingExit(0, [
           // Token success
           () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
-          // getRecentLikes success
+          // getRecentLikes success (parallel)
           () =>
             Promise.resolve(
               mockResponse(true, {
@@ -1580,16 +1604,18 @@ Deno.test("main", async (t) => {
                 ],
               })
             ),
-          // getPlaylistTracks returns different tracks
+          // getPlaylistTracks returns different tracks (parallel)
           () => Promise.resolve(mockResponse(true, { items: [] })),
           // updatePlaylist success
           () =>
             Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
-          // updatePlaylistMetadata success
+          // updatePlaylistTitle success
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+          // updatePlaylistDescription success
           () => Promise.resolve(mockResponse(true, {}, 200)),
         ]);
 
-        assertEquals(fetchCalls, 5);
+        assertEquals(fetchCalls, 6);
       } finally {
         restoreConsoleMocks();
       }
@@ -1615,6 +1641,9 @@ Deno.test("main", async (t) => {
           () => Promise.resolve(mockResponse(true, { items: [] })),
           () =>
             Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // updatePlaylistTitle
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+          // updatePlaylistDescription
           () => Promise.resolve(mockResponse(true, {}, 200)),
         ]);
 
@@ -1791,12 +1820,13 @@ Deno.test("main", async (t) => {
   );
 
   await t.step(
-    "should include sync timestamp description in metadata update",
+    "should include check timestamp description in metadata update",
     withEnv(defaultEnv, async () => {
       const time = new FakeTime(new Date("2026-01-11T14:32:45.000Z"));
       setupConsoleMocks();
 
-      let capturedBody: string | undefined;
+      let capturedTitleBody: string | undefined;
+      let capturedDescBody: string | undefined;
       const exitStub = stub(Deno, "exit", (code?: number) => {
         throw new Error(`Deno.exit(${code})`);
       });
@@ -1824,7 +1854,13 @@ Deno.test("main", async (t) => {
           return Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201));
         }
         if (callIndex === 5) {
-          capturedBody = (options as RequestInit).body as string;
+          // updatePlaylistTitle
+          capturedTitleBody = (options as RequestInit).body as string;
+          return Promise.resolve(mockResponse(true, {}, 200));
+        }
+        if (callIndex === 6) {
+          // updatePlaylistDescription
+          capturedDescBody = (options as RequestInit).body as string;
           return Promise.resolve(mockResponse(true, {}, 200));
         }
         return Promise.resolve(mockResponse(true, {}));
@@ -1841,9 +1877,10 @@ Deno.test("main", async (t) => {
         time.restore();
       }
 
-      const body = JSON.parse(capturedBody!);
-      assertEquals(body.name, "LAST2LIKED");
-      assertEquals(body.description, "Last sync: 2026-01-11 14:32:45 UTC");
+      const titleBody = JSON.parse(capturedTitleBody!);
+      const descBody = JSON.parse(capturedDescBody!);
+      assertEquals(titleBody.name, "LAST2LIKED");
+      assertEquals(descBody.description, "Checked: 2026-01-11 14:32:45 UTC");
     })
   );
 
@@ -1854,12 +1891,14 @@ Deno.test("main", async (t) => {
       try {
         const { fetchCalls } = await runMainExpectingExit(0, [
           () => Promise.resolve(mockResponse(true, { access_token: "valid-token" })),
-          // Empty likes
+          // Empty likes (parallel with playlist tracks)
+          () => Promise.resolve(mockResponse(true, { items: [] })),
+          // Playlist tracks (parallel with likes)
           () => Promise.resolve(mockResponse(true, { items: [] })),
         ]);
 
-        // Should only call token + likes (2 calls), no update
-        assertEquals(fetchCalls, 2);
+        // Should call token + likes + playlistTracks (3 calls, parallel fetch), no update
+        assertEquals(fetchCalls, 3);
         assertEquals(
           consoleLogStub.calls.some((c) =>
             String(c.args[0]).includes("No liked tracks found - playlist unchanged")
@@ -1939,11 +1978,14 @@ Deno.test("main", async (t) => {
             ),
           () =>
             Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // updatePlaylistTitle
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+          // updatePlaylistDescription
           () => Promise.resolve(mockResponse(true, {}, 200)),
         ]);
 
-        // Should make 5 calls including updatePlaylist
-        assertEquals(fetchCalls, 5);
+        // Should make 6 calls: token, likes, playlistTracks, updatePlaylist, title, description
+        assertEquals(fetchCalls, 6);
         assertEquals(
           consoleLogStub.calls.some((c) =>
             String(c.args[0]).includes("Replacing playlist contents with 2 tracks")
@@ -1984,11 +2026,14 @@ Deno.test("main", async (t) => {
             ),
           () =>
             Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // updatePlaylistTitle
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+          // updatePlaylistDescription
           () => Promise.resolve(mockResponse(true, {}, 200)),
         ]);
 
-        // Order matters - should proceed with update
-        assertEquals(fetchCalls, 5);
+        // Order matters - should proceed with update (6 calls)
+        assertEquals(fetchCalls, 6);
         assertEquals(
           consoleLogStub.calls.some((c) =>
             String(c.args[0]).includes("Replacing playlist contents with 2 tracks")
@@ -2021,11 +2066,14 @@ Deno.test("main", async (t) => {
           () => Promise.resolve(mockResponse(false, {}, 500)),
           () =>
             Promise.resolve(mockResponse(true, { snapshot_id: "snapshot123" }, 201)),
+          // updatePlaylistTitle
+          () => Promise.resolve(mockResponse(true, {}, 200)),
+          // updatePlaylistDescription
           () => Promise.resolve(mockResponse(true, {}, 200)),
         ]);
 
-        // Should proceed with update despite getPlaylistTracks failure
-        assertEquals(fetchCalls, 5);
+        // Should proceed with update despite getPlaylistTracks failure (6 calls)
+        assertEquals(fetchCalls, 6);
         assertEquals(
           consoleWarnStub.calls.some((c) =>
             String(c.args[0]).includes("Fetch playlist tracks failed")
@@ -2039,7 +2087,7 @@ Deno.test("main", async (t) => {
   );
 
   await t.step(
-    "should still update metadata when skipping playlist update",
+    "should only update description when skipping playlist update (no title update)",
     withEnv(defaultEnv, async () => {
       const time = new FakeTime(new Date("2026-01-11T15:00:00.000Z"));
       setupConsoleMocks();
@@ -2065,6 +2113,7 @@ Deno.test("main", async (t) => {
           return Promise.resolve(mockResponse(true, { items: tracks }));
         }
         if (callIndex === 4) {
+          // Only description update when tracks unchanged (no title update)
           capturedBody = (options as RequestInit).body as string;
           return Promise.resolve(mockResponse(true, {}, 200));
         }
@@ -2082,15 +2131,15 @@ Deno.test("main", async (t) => {
         time.restore();
       }
 
-      // Verify metadata call was made with correct timestamp
+      // Verify only description was updated (no title since tracks unchanged)
       const body = JSON.parse(capturedBody!);
-      assertEquals(body.name, "LAST1LIKED");
-      assertEquals(body.description, "Last sync: 2026-01-11 15:00:00 UTC");
+      assertEquals(body.description, "Checked: 2026-01-11 15:00:00 UTC");
+      assertEquals(body.name, undefined);
     })
   );
 
   await t.step(
-    "should exit with code 0 when playlist up-to-date even if metadata update fails",
+    "should exit with code 0 when playlist up-to-date even if description update fails",
     withEnv(defaultEnv, async () => {
       setupConsoleMocks();
       const tracks = [{ track: { uri: "spotify:track:abc123" } }];
@@ -2101,7 +2150,7 @@ Deno.test("main", async (t) => {
           () => Promise.resolve(mockResponse(true, { items: tracks })),
           // Same tracks - triggers idempotent path
           () => Promise.resolve(mockResponse(true, { items: tracks })),
-          // Metadata update fails
+          // Description update fails (no title update when tracks unchanged)
           () => Promise.resolve(mockResponse(false, {}, 500)),
         ]);
 
@@ -2113,7 +2162,7 @@ Deno.test("main", async (t) => {
         );
         assertEquals(
           consoleWarnStub.calls.some((c) =>
-            String(c.args[0]).includes("Could not update playlist title")
+            String(c.args[0]).includes("Could not update playlist description")
           ),
           true
         );
@@ -2160,7 +2209,7 @@ Deno.test("PlaylistDetails type guard", async (t) => {
   await t.step("should return true for valid PlaylistDetails with string description", () => {
     const data = {
       name: "LAST30LIKED",
-      description: "Last sync: 2026-01-11 14:32:45 UTC",
+      description: "Checked: 2026-01-11 14:32:45 UTC",
       tracks: { total: 30 },
     };
     assertEquals(isPlaylistDetails(data), true);
@@ -2215,22 +2264,22 @@ Deno.test("PlaylistDetails type guard", async (t) => {
 
 Deno.test("Description verification logic", async (t) => {
   await t.step("should recognize valid sync timestamp format", () => {
-    const description = "Last sync: 2026-01-11 14:32:45 UTC";
-    assertEquals(description.startsWith("Last sync:"), true);
+    const description = "Checked: 2026-01-11 14:32:45 UTC";
+    assertEquals(description.startsWith("Checked:"), true);
   });
 
-  await t.step("should recognize description starting with Last sync:", () => {
+  await t.step("should recognize description starting with Checked:", () => {
     const validDescriptions = [
-      "Last sync: 2026-01-11 14:32:45 UTC",
-      "Last sync: 2025-12-31 23:59:59 UTC",
-      "Last sync: 2020-01-01 00:00:00 UTC",
+      "Checked: 2026-01-11 14:32:45 UTC",
+      "Checked: 2025-12-31 23:59:59 UTC",
+      "Checked: 2020-01-01 00:00:00 UTC",
     ];
     validDescriptions.forEach((desc) => {
-      assertEquals(desc.startsWith("Last sync:"), true);
+      assertEquals(desc.startsWith("Checked:"), true);
     });
   });
 
-  await t.step("should reject descriptions not starting with Last sync:", () => {
+  await t.step("should reject descriptions not starting with Checked:", () => {
     const invalidDescriptions = [
       "Sync: 2026-01-11 14:32:45 UTC",
       "Updated: 2026-01-11",
@@ -2238,23 +2287,23 @@ Deno.test("Description verification logic", async (t) => {
       "Random description",
     ];
     invalidDescriptions.forEach((desc) => {
-      assertEquals(desc.startsWith("Last sync:"), false);
+      assertEquals(desc.startsWith("Checked:"), false);
     });
   });
 
   await t.step("should handle null description", () => {
     const checkDescription = (desc: string | null): boolean => {
-      return desc !== null && desc.startsWith("Last sync:");
+      return desc !== null && desc.startsWith("Checked:");
     };
     assertEquals(checkDescription(null), false);
-    assertEquals(checkDescription("Last sync: 2026-01-11 14:32:45 UTC"), true);
+    assertEquals(checkDescription("Checked: 2026-01-11 14:32:45 UTC"), true);
     assertEquals(checkDescription("Other description"), false);
   });
 
   await t.step("should validate timestamp format YYYY-MM-DD HH:mm:ss UTC", () => {
-    const timestampPattern = /^Last sync: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/;
-    assertEquals(timestampPattern.test("Last sync: 2026-01-11 14:32:45 UTC"), true);
-    assertEquals(timestampPattern.test("Last sync: 2026-01-11 14:32 UTC"), false);
-    assertEquals(timestampPattern.test("Last sync: 2026-01-11T14:32:45 UTC"), false);
+    const timestampPattern = /^Checked: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/;
+    assertEquals(timestampPattern.test("Checked: 2026-01-11 14:32:45 UTC"), true);
+    assertEquals(timestampPattern.test("Checked: 2026-01-11 14:32 UTC"), false);
+    assertEquals(timestampPattern.test("Checked: 2026-01-11T14:32:45 UTC"), false);
   });
 });

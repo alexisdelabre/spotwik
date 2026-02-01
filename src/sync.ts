@@ -364,6 +364,8 @@ export async function updatePlaylistDescription(
     return false;
   }
 
+  console.log(`🔄 Updating playlist description...`);
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -395,6 +397,7 @@ export async function updatePlaylistDescription(
     return false;
   }
 
+  console.log(`✅ Playlist description updated`);
   return true;
 }
 

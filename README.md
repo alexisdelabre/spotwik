@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🎵 Spotwik
+<img src="assets/logo-white.svg" alt="Spotwik logo" width="128" height="128">
+
+# Spotwik
 
 **Keep your favorite Spotify playlist synced with your latest liked songs**
 

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Spotwik logo">
+  <!-- bottom chevrons (playlist) -->
+  <polygon points="48,156 128,108 208,156 176,176 128,148 80,176"
+           fill="#FFFFFF"/>
+  <polygon points="48,124 128,76 208,124 176,144 128,116 80,144"
+           fill="#FFFFFF"/>
+
+  <!-- offset sync layer -->
+  <polygon points="64,88 128,52 192,88 160,108 128,88 96,108"
+           fill="#22C55E"/>
+
+  <!-- top prism / play -->
+  <polygon points="64,56 128,20 192,56 128,96"
+           fill="#FFFFFF"/>
+</svg>
